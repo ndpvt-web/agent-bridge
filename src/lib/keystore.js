@@ -103,6 +103,11 @@ class KeyStore {
   }
 
   touchAgent(id) {
+    // Throttled: at most one disk write per agent per 30 s.
+    this._lastTouch = this._lastTouch || {};
+    const now = Date.now();
+    if (this._lastTouch[id] && now - this._lastTouch[id] < 30000) return;
+    this._lastTouch[id] = now;
     const agents = this._readJson(this.agentsPath, []);
     const a = agents.find(x => x.id === id);
     if (a) { a.last_seen_at = new Date().toISOString(); this._writeJson(this.agentsPath, agents); }

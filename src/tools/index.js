@@ -188,11 +188,14 @@ tools['fs.write'] = {
     const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
     const openFlags = mode === 'append'
       ? fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | NOFOLLOW
-      : fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | NOFOLLOW;
+      : mode === 'create'
+        ? fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW
+        : fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | NOFOLLOW;
     let fd;
     try { fd = fs.openSync(real, openFlags, 0o600); }
     catch (e) {
       if (e && e.code === 'ELOOP') throw new JailError('refusing to write through symlink');
+      if (e && e.code === 'EEXIST') throw new ToolError('exists', 'file exists (mode=create)');
       throw e;
     }
     try { fs.writeSync(fd, buf, 0, buf.length, mode === 'append' ? null : 0); }
@@ -218,11 +221,15 @@ tools['fs.delete'] = {
     return { summary: `delete ${real}`, payload: { real } };
   },
   execute(ctx, payload) {
+    // Re-validate at execution time: the world may have changed since approval.
+    const { real } = resolveInRoots(payload.real, [ctx.cfg.workspace_root], ctx.cfg.workspace_root);
+    if (real !== payload.real) throw new JailError('path changed since approval - refusing');
+    assertRegularFileOrDir(real); // still not a symlink, still regular
     const trashDir = path.join(ctx.cfg.install_dir, 'trash');
     fs.mkdirSync(trashDir, { recursive: true, mode: 0o700 });
-    const dest = path.join(trashDir, Date.now() + '-' + path.basename(payload.real));
-    fs.renameSync(payload.real, dest);
-    ctx.audit.record({ agent: ctx.agent.id, tool: 'fs.delete', decision: 'executed', detail: payload.real + ' -> ' + dest });
+    const dest = path.join(trashDir, Date.now() + '-' + require('crypto').randomBytes(4).toString('hex') + '-' + path.basename(real));
+    fs.renameSync(real, dest);
+    ctx.audit.record({ agent: ctx.agent.id, tool: 'fs.delete', decision: 'executed', detail: real + ' -> ' + dest });
     return { moved_to_trash: dest };
   },
 };

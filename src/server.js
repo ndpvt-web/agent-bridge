@@ -223,7 +223,11 @@ function startServer(installDir, opts = {}) {
       if (req.method === 'POST' && pathName === '/mcp') {
         const rawBody = await readBody(req, cfg.max_body_bytes);
         const auth = await authenticate(req, rawBody, pathName);
-        if (auth.error) return json(res, auth.error[0], { error: auth.error[1] });
+        if (auth.error) {
+          // Forensics: every auth failure is on the record.
+          audit.record({ agent: req.headers['x-bridge-agent'] || null, tool: 'auth', decision: 'rejected', detail: String(auth.error[1]).slice(0, 120) });
+          return json(res, auth.error[0], { error: auth.error[1] });
+        }
         keystore.touchAgent(auth.agent.id);
         return await handleMcp(req, res, auth.agent, rawBody);
       }

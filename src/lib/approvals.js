@@ -55,7 +55,11 @@ class Approvals {
 
   // kind: 'shell' | 'process' | 'delete' | 'write'
   create({ kind, agentId, summary, payload, toolName }) {
-    const list = this._read().filter(a => a.status === 'pending' && Date.now() < a.expires_at);
+    // Keep live pendings; also retain the most recent 200 decided records for forensics.
+    const all = this._read();
+    const live = all.filter(a => a.status === 'pending' && Date.now() < a.expires_at);
+    const decided = all.filter(a => !(a.status === 'pending' && Date.now() < a.expires_at)).slice(-200);
+    const list = [...decided, ...live];
     const a = {
       id: 'apr_' + crypto.randomBytes(9).toString('base64url'),
       kind, agent_id: agentId,
