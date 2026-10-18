@@ -97,7 +97,7 @@ sequenceDiagram
     participant M as AgentBridge (your Mac)
     A->>M: 1. Pair with the one-time code
     A->>M: 2. Signed request (Ed25519)
-    M->>M: 3. Checked against your rules; risky ones wait for you
+    M->>M: 3. Checked against your rules, risky ones wait for you
     M-->>A: 4. Approved copy runs once, logged
 ```
 
