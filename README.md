@@ -11,7 +11,7 @@ One command to install. One command to connect. You approve what matters.
 [![Version: 2.1.0](https://img.shields.io/badge/version-2.1.0-green)]()
 [![Tests: 306 passing](https://img.shields.io/badge/tests-306%20passing-brightgreen)]()
 
-[Quick Start](#quick-start) · [Two Modes](#two-modes) · [Works With](#works-with-your-agent) · [Security](#how-it-stays-safe) · [Docs](docs)
+[Works With](#works-with-your-agent) · [Quick Start](#quick-start) · [Two Modes](#two-modes) · [Security](#how-it-stays-safe) · [Docs](docs)
 
 </div>
 
@@ -21,13 +21,21 @@ Your Mac, remote-controlled by an AI agent - without handing over the keys.
 
 AgentBridge runs a tiny, zero-dependency server on your Mac. Point your cloud agent at it, and the agent can do real work on your machine: run builds, read and write files, execute commands - inside limits you choose. Anything risky waits for your approval, and **what you approve is exactly what runs**.
 
-## Why AgentBridge
+## Works with your agent
 
-- **You stay in charge** - risky commands, deletions, and shell access wait for your yes on the Mac itself
-- **No bait-and-switch** - approving a command freezes a private copy of every file it names, and the run executes the copies
-- **Your files stay in a jail** - the agent sees only the folder you choose; writes are versioned, deletes go to a trash folder
-- **Every action is logged** - a tamper-evident audit trail of who did what, when
-- **Zero dependencies** - no Homebrew, no npm install; the installer sets up a pinned, hash-verified Node for you
+<p>
+<a href="#works-with-your-agent"><img alt="Instinct" src="https://img.shields.io/badge/Instinct-7c3aed"></a>
+<a href="#works-with-your-agent"><img alt="ChatGPT / Codex" src="https://img.shields.io/badge/ChatGPT%20%2F%20Codex-74aa9c?logo=openai&logoColor=white"></a>
+<a href="#works-with-your-agent"><img alt="Claude" src="https://img.shields.io/badge/Claude-191919?logo=anthropic&logoColor=white"></a>
+<a href="#works-with-your-agent"><img alt="Cursor" src="https://img.shields.io/badge/Cursor-000000?logo=cursor&logoColor=white"></a>
+<a href="#works-with-your-agent"><img alt="Meta Muse" src="https://img.shields.io/badge/Meta%20Muse-0668E1?logo=meta&logoColor=white"></a>
+</p>
+
+
+- **Instinct** - paste the tunnel URL and pairing code into your chat. It connects itself; you approve on the Mac.
+- **Claude, ChatGPT / Codex, Cursor, Meta Muse, or your own agent** - if it can make HTTPS requests, it can pair: the handshake is two calls, written up in [docs/protocol.md](docs/protocol.md). Give your agent the tunnel URL, the pairing code, and that doc.
+
+AgentBridge speaks MCP-style JSON-RPC (`initialize`, `tools/list`, `tools/call`) over signed HTTPS. A small adapter for native MCP client configs (`mcp.json`) is not built yet.
 
 ## Quick start
 
@@ -82,13 +90,6 @@ agent-bridge mode full
 agent-bridge mode safe
 ```
 
-## Works with your agent
-
-- **Instinct** - paste the tunnel URL and pairing code into your chat. It connects itself; you approve on the Mac.
-- **Claude, ChatGPT / Codex, Cursor, Meta Muse, or your own agent** - if it can make HTTPS requests, it can pair: the handshake is two calls, written up in [docs/protocol.md](docs/protocol.md). Give your agent the tunnel URL, the pairing code, and that doc.
-
-AgentBridge speaks MCP-style JSON-RPC (`initialize`, `tools/list`, `tools/call`) over signed HTTPS. A small adapter for native MCP client configs (`mcp.json`) is not built yet.
-
 ## How it works
 
 ```
@@ -128,6 +129,14 @@ agent-bridge trash      # browse and restore deleted files
 5. **Tamper-evident audit log** - hash-chained; edits to history show up as tampering.
 
 Install downloads are version-pinned and SHA-256-verified, fail-closed, with no unverified system-binary fallback.
+
+## Why AgentBridge
+
+- **You stay in charge** - risky commands, deletions, and shell access wait for your yes on the Mac itself
+- **No bait-and-switch** - approving a command freezes a private copy of every file it names, and the run executes the copies
+- **Your files stay in a jail** - the agent sees only the folder you choose; writes are versioned, deletes go to a trash folder
+- **Every action is logged** - a tamper-evident audit trail of who did what, when
+- **Zero dependencies** - no Homebrew, no npm install; the installer sets up a pinned, hash-verified Node for you
 
 ## Docs
 
