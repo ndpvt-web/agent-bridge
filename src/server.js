@@ -1,6 +1,6 @@
 'use strict';
 /*
- * AgentBridge server v2.0.0
+ * AgentBridge server v2.1.0
  * Zero npm dependencies. Node.js built-ins only.
  *
  * Security model (see docs/threat-model.md):
@@ -12,7 +12,8 @@
  *  - Capability tools (MCP-style JSON-RPC), not a raw shell. Shell access is
  *    a separate install-time opt-in and every call needs on-device approval.
  *  - Filesystem jail with realpath symlink resolution; writes workspace-only.
- *  - On-device approval gate for irreversible or elevated operations.
+ *  - On-device approval gate for irreversible or elevated operations; an
+ *    approved command runs FROZEN COPIES of the workspace files it named.
  *  - Hash-chained, HMAC-authenticated audit log.
  *  - No CORS. Custom-header + exact content-type requirement defeats
  *    browser drive-by and DNS-rebinding requests.
@@ -28,26 +29,42 @@ const { Approvals } = require('./lib/approvals');
 const { loadConfig, PROFILES } = require('./lib/config');
 const { tools, ToolError, pendingResult } = require('./tools');
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const PROTOCOL_VERSION = '2025-06-18';
 
 function startServer(installDir, opts = {}) {
   const cfg = loadConfig(installDir);
   const keystore = new KeyStore(path.join(installDir, 'secrets'));
   const approvals = new Approvals(path.join(installDir, 'approvals'));
-  const audit = new AuditLog(path.join(installDir, 'logs', 'audit.jsonl'), keystore.auditKey());
+  const audit = new AuditLog(path.join(installDir, 'logs', 'audit.jsonl'), keystore.auditKey(), { maxBytes: cfg.audit_max_bytes });
   fs.mkdirSync(path.join(installDir, 'logs'), { recursive: true, mode: 0o700 });
   fs.mkdirSync(cfg.workspace_root, { recursive: true, mode: 0o700 });
   const nonces = new NonceCache();
   const limiter = new RateLimiter();
   const bootTime = Date.now(); // timestamps older than boot are always rejected (nonce cache is in-memory)
 
-  const readRoots = [cfg.workspace_root, ...(cfg.read_roots_extra || [])];
+  // One policy object, built at startup: no per-tool fullMode branches.
   const fullMode = cfg.mode === 'full';
+  const denyBridgeState = { installDir: cfg.install_dir, workspaceRoot: cfg.workspace_root };
+  const policy = fullMode
+    ? { fullMode: true, readRoots: ['/'], readOpts: denyBridgeState, writeRoots: ['/'], writeOpts: denyBridgeState }
+    : {
+        fullMode: false,
+        readRoots: [cfg.workspace_root, ...(cfg.read_roots_extra || [])],
+        readOpts: denyBridgeState,
+        writeRoots: [cfg.workspace_root],
+        writeOpts: denyBridgeState,
+      };
   if (fullMode) {
-    console.warn('[agent-bridge] *** FULL PERMISSION MODE: no jail, no approvals, shell enabled. Every paired agent has full control of this account. Switch back: agent-bridge mode limited ***');
-    audit.record({ agent: null, tool: 'server', decision: 'started_full_mode', detail: 'FULL permission mode active' });
+    console.warn('[agent-bridge] *** FULL PERMISSION MODE: no jail, no approvals, shell enabled. Every paired agent with process rights has full control of this account (bridge state stays denied). Switch back: agent-bridge mode limited ***');
   }
+  audit.record({ agent: null, tool: 'server', decision: 'started', detail: 'mode=' + cfg.mode });
+  // The running mode, for the CLI to show (config edits need a restart).
+  try {
+    fs.mkdirSync(path.join(installDir, 'run'), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(installDir, 'run', 'server-info.json'),
+      JSON.stringify({ pid: process.pid, mode: cfg.mode, version: VERSION, started_at: new Date().toISOString() }), { mode: 0o600 });
+  } catch {}
 
   function json(res, code, obj) {
     const body = JSON.stringify(obj);
@@ -107,6 +124,26 @@ function startServer(installDir, opts = {}) {
     return Array.isArray(cf) ? String(cf[0]) : (cf ? String(cf) : ra);
   }
 
+  function noteAuthFailure(req, reason) {
+    // Throttle authentication failures: 30/min/source AND 300/min
+    // global (a loopback client rotating CF-Connecting-IP cannot reset
+    // its budget). Returns true when the caller should answer 429.
+    const ip = clientIp(req);
+    const n = limiter.count('authfail:' + ip, 60000);
+    const g = limiter.count('authfail:*', 60000);
+    limiter.record('authfail:' + ip, 60000);
+    limiter.record('authfail:*', 60000);
+    // Bounded forensics keyed GLOBALLY: an unauthenticated flood must
+    // not fill the disk no matter how source headers rotate. First 10
+    // failures per minute are logged in full, then every 100th, always
+    // with the running count.
+    if (g < 10 || g % 100 === 0) {
+      audit.record({ agent: req.headers['x-bridge-agent'] || null, tool: 'auth', decision: 'rejected',
+        detail: String(reason).slice(0, 120) + ' [failures this minute: ' + (g + 1) + ']' });
+    }
+    return n >= 30 || g >= 300;
+  }
+
   // --- /pair ---
   async function handlePair(req, res, ip) {
     // Same drive-by hardening as /mcp: a cross-origin browser POST cannot
@@ -129,14 +166,14 @@ function startServer(installDir, opts = {}) {
       return json(res, 429, { error: 'too many failed pairing attempts', retry_after_ms: cfg.pair_rate_limit.window_ms });
     }
     let body;
-    try { body = JSON.parse(await readBody(req, 4096)); }
-    catch { return json(res, 400, { error: 'invalid JSON' }); }
+    try {
+      body = JSON.parse(await readBody(req, 4096));
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('bad body');
+    }
+    catch { return json(res, 400, { error: 'invalid JSON body' }); }
     const code = body.pairing_code;
     const name = body.agent_name;
     const publicKey = body.public_key;
-    // Names reach the human's terminal (CLI lists them): printable only, no
-    // control characters - a forged "screen clear" is a social attack on
-    // the approver.
     // Names reach the human's terminal. Block control chars AND Unicode
     // format characters (bidi overrides, zero-width, U+2028/9): a name that
     // visually reorders or hides text is a social attack on the approver.
@@ -150,9 +187,9 @@ function startServer(installDir, opts = {}) {
     }
     const consumed = keystore.consumePairingCode(code);
     if (!consumed) {
-      limiter.check('pairfail:' + ip, 1000000, cfg.pair_rate_limit.window_ms); // record one failure (per-source)
+      limiter.record('pairfail:' + ip, cfg.pair_rate_limit.window_ms);
       const g = limiter.count('pairfail:*', cfg.pair_rate_limit.window_ms);
-      limiter.check('pairfail:*', 1000000, cfg.pair_rate_limit.window_ms);    // and one globally
+      limiter.record('pairfail:*', cfg.pair_rate_limit.window_ms);
       // Bounded forensics: first 10 failures per window in full, then every 100th.
       if (g < 10 || g % 100 === 0) {
         audit.record({ agent: null, tool: 'pair', decision: 'rejected', detail: 'bad or expired code from ' + ip + ' [failures this window: ' + (g + 1) + ']' });
@@ -171,42 +208,49 @@ function startServer(installDir, opts = {}) {
   }
 
   // --- authenticated request pipeline ---
-  async function authenticate(req, rawBody, pathName) {
+  // Header-only checks run BEFORE the body is read, so junk requests do not
+  // get to buffer megabytes first. The signature itself needs the body.
+  function authenticateHeaders(req) {
     const h = req.headers;
-    if (h['x-bridge-request'] !== '1') return { error: [400, 'missing X-Bridge-Request header'] };
-    if ((h['content-type'] || '') !== 'application/json') return { error: [415, 'Content-Type must be exactly application/json'] };
+    if (h['x-bridge-request'] !== '1') return [400, 'missing X-Bridge-Request header'];
+    if ((h['content-type'] || '') !== 'application/json') return [415, 'Content-Type must be exactly application/json'];
     const agentId = h['x-bridge-agent'];
     const ts = h['x-bridge-ts'];
     const nonce = h['x-bridge-nonce'];
     const sig = h['x-bridge-sign'];
-    if (!agentId || !ts || !nonce || !sig) return { error: [401, 'missing auth headers'] };
-
+    if (!agentId || !ts || !nonce || !sig) return [401, 'missing auth headers'];
+    if (typeof sig !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(sig)) return [401, 'bad signature shape'];
     const agent = keystore.getAgent(agentId);
-    if (!agent) return { error: [401, 'unknown agent'] };
-    if (agent.revoked) return { error: [401, 'agent revoked'] };
-
+    if (!agent) return [401, 'unknown agent'];
+    if (agent.revoked) return [401, 'agent revoked'];
     const tsNum = Number(ts);
     // Strict: nothing signed before this process booted. The nonce cache is
     // in-memory, so accepting pre-boot timestamps re-opens replay across a
     // restart.
     if (!Number.isFinite(tsNum) || Math.abs(Date.now() - tsNum) > 120000 || tsNum < bootTime) {
-      return { error: [401, 'timestamp outside +/-120s window'] };
+      return [401, 'timestamp outside +/-120s window'];
     }
     if (typeof nonce !== 'string' || nonce.length < 16 || nonce.length > 128) {
-      return { error: [401, 'bad nonce'] };
+      return [401, 'bad nonce'];
     }
     // Replay check WITHOUT recording: the nonce is burned only after the
-    // signature verifies. Otherwise junk-signed requests could pre-burn a
-    // victim's nonce (selective DoS) or flood the cache to evict a captured
-    // nonce and replay the captured request. No await happens between the
-    // check and the record, so check+set is atomic on the event loop.
-    if (nonces.has(agentId, nonce)) return { error: [401, 'replay detected'] };
+    // signature verifies (see below). Otherwise junk-signed requests could
+    // pre-burn a victim's nonce (selective DoS) or flood the cache to evict
+    // a captured nonce and replay the captured request.
+    if (nonces.has(agentId, nonce)) return [401, 'replay detected'];
+    return null; // headers OK
+  }
 
+  function authenticateBody(req, rawBody, pathName, agentId, ts, nonce, sig, agent) {
+    // Replay check again: the earlier header check raced ahead of an awaited
+    // body read, so the check and the record must happen HERE, with no await
+    // between them (atomic on the event loop).
+    if (nonces.has(agentId, nonce)) return [401, 'replay detected'];
     const bodyHash = bodyHashHex(rawBody);
     const canonical = canonicalString({ agentId, ts, nonce, method: req.method, path: pathName, bodyHash });
-    if (!verifySignature(agent.public_key, canonical, sig)) return { error: [401, 'bad signature'] };
+    if (!verifySignature(agent.public_key, canonical, sig)) return [401, 'bad signature'];
     nonces.record(agentId, nonce);
-    return { agent };
+    return null;
   }
 
   // --- JSON-RPC / MCP dispatch ---
@@ -222,7 +266,7 @@ function startServer(installDir, opts = {}) {
     if (!rl.allowed) return fail(-32029, 'rate limited', { retry_after_ms: rl.retryAfterMs });
 
     const method = rpc.method;
-    const ctx = { cfg, agent, approvals, audit, keystore, readRoots, version: VERSION, fullMode };
+    const ctx = { cfg, agent, approvals, audit, keystore, version: VERSION, policy };
 
     if (method === 'initialize') {
       return reply({
@@ -254,9 +298,9 @@ function startServer(installDir, opts = {}) {
           audit.record({ agent: agent.id, tool: name, decision: 'executed' });
           return reply({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result });
         }
-        const plan = tool.plan(ctx, args);
+        const plan = await tool.plan(ctx, args);
         const always = tool.approval !== 'conditional';
-        if (!fullMode && (always || plan.needsApproval)) {
+        if (!policy.fullMode && (always || plan.needsApproval)) {
           const kind = tool.approval === 'conditional' ? 'process' : tool.approval;
           const result = pendingResult(ctx, kind, name, plan.summary, plan.payload);
           return reply({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result });
@@ -295,30 +339,22 @@ function startServer(installDir, opts = {}) {
         return await handlePair(req, res, clientIp(req));
       }
       if (req.method === 'POST' && pathName === '/mcp') {
-        const rawBody = await readBody(req, cfg.max_body_bytes);
-        const auth = await authenticate(req, rawBody, pathName);
-        if (auth.error) {
-          // Throttle authentication failures: 30/min/source AND 300/min
-          // global (a loopback client rotating CF-Connecting-IP cannot reset
-          // its budget).
-          const ip = clientIp(req);
-          const n = limiter.count('authfail:' + ip, 60000);
-          const g = limiter.count('authfail:*', 60000);
-          limiter.check('authfail:' + ip, 1000000, 60000); // record this failure
-          limiter.check('authfail:*', 1000000, 60000);
-          if (n >= 30 || g >= 300) return json(res, 429, { error: 'too many failed authentication attempts', retry_after_ms: 60000 });
-          // Bounded forensics keyed GLOBALLY: an unauthenticated flood must
-          // not fill the disk no matter how source headers rotate. First 10
-          // failures per minute are logged in full, then every 100th, always
-          // with the running count.
-          if (g < 10 || g % 100 === 0) {
-            audit.record({ agent: req.headers['x-bridge-agent'] || null, tool: 'auth', decision: 'rejected',
-              detail: String(auth.error[1]).slice(0, 120) + ' [failures this minute: ' + (g + 1) + ']' });
-          }
-          return json(res, auth.error[0], { error: auth.error[1] });
+        // Cheap header checks BEFORE buffering the body.
+        const hdrErr = authenticateHeaders(req);
+        if (hdrErr) {
+          if (noteAuthFailure(req, hdrErr[1])) return json(res, 429, { error: 'too many failed authentication attempts', retry_after_ms: 60000 });
+          return json(res, hdrErr[0], { error: hdrErr[1] });
         }
-        keystore.touchAgent(auth.agent.id);
-        return await handleMcp(req, res, auth.agent, rawBody);
+        const rawBody = await readBody(req, cfg.max_body_bytes);
+        const h = req.headers;
+        const agent = keystore.getAgent(h['x-bridge-agent']);
+        const sigErr = authenticateBody(req, rawBody, pathName, h['x-bridge-agent'], h['x-bridge-ts'], h['x-bridge-nonce'], h['x-bridge-sign'], agent);
+        if (sigErr) {
+          if (noteAuthFailure(req, sigErr[1])) return json(res, 429, { error: 'too many failed authentication attempts', retry_after_ms: 60000 });
+          return json(res, sigErr[0], { error: sigErr[1] });
+        }
+        keystore.touchAgent(agent.id);
+        return await handleMcp(req, res, agent, rawBody);
       }
       return json(res, 404, { error: 'not found' });
     } catch (e) {
@@ -326,6 +362,8 @@ function startServer(installDir, opts = {}) {
       return json(res, 500, { error: 'internal error' });
     }
   });
+  // Bound concurrent connections: buffered request bodies cost memory each.
+  server.maxConnections = 64;
 
   const bind = opts.bind || cfg.bind || '127.0.0.1';
   const port = opts.port || cfg.port;

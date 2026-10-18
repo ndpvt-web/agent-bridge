@@ -14,6 +14,17 @@ function realpathOrSelf(p) {
   try { return fs.realpathSync.native(p); } catch { return p; }
 }
 
+// APFS is case-insensitive by default and realpath does not reliably return
+// canonical case, so on macOS the prefix compare folds case. Over-strict on
+// a case-sensitive volume (a look-alike sibling is denied too): safe side.
+const CASE_FOLD = process.platform === 'darwin';
+function insideRoot(real, realRoot) {
+  let a = real, b = realRoot;
+  if (CASE_FOLD) { a = a.toLowerCase(); b = b.toLowerCase(); }
+  const prefix = b === path.parse(b).root ? b : b + path.sep;
+  return a === b || a.startsWith(prefix);
+}
+
 // Resolve `target` against `roots` (array of absolute real paths).
 // Relative paths resolve against `anchor` (the workspace root), never the
 // process cwd. opts.installDir + opts.workspaceRoot: anything inside the
@@ -26,11 +37,13 @@ function resolveInRoots(target, roots, anchor, opts = {}) {
   const expanded = target.replace(/^~(?=$|\/)/, os.homedir());
   const abs = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(anchor || roots[0], expanded);
 
-  // Walk up to the deepest existing ancestor; resolve it for real, then
-  // re-append the non-existing tail lexically. Guards writes to new files.
+  // Walk up to the deepest existing ancestor (lstat, so a dangling symlink
+  // counts as existing); resolve it for real, then re-append the
+  // non-existing tail lexically. Guards writes to new files.
   let cur = abs;
   const tail = [];
-  while (!fs.existsSync(cur)) {
+  for (;;) {
+    try { fs.lstatSync(cur); break; } catch {}
     const parent = path.dirname(cur);
     if (parent === cur) break; // reached filesystem root without existing
     tail.unshift(path.basename(cur));
@@ -41,14 +54,13 @@ function resolveInRoots(target, roots, anchor, opts = {}) {
 
   for (const root of roots) {
     const realRoot = realpathOrSelf(root);
-    const prefix = realRoot === path.parse(realRoot).root ? realRoot : realRoot + path.sep;
-    if (real === realRoot || real.startsWith(prefix)) {
+    if (insideRoot(real, realRoot)) {
       if (opts.installDir && opts.workspaceRoot) {
         const inst = realpathOrSelf(opts.installDir);
         const ws = realpathOrSelf(opts.workspaceRoot);
-        const inInst = real === inst || real.startsWith(inst + path.sep);
-        const inWs = real === ws || real.startsWith(ws + path.sep);
-        if (inInst && !inWs) throw new JailError('bridge state is not agent-visible: ' + target);
+        if (insideRoot(real, inst) && !insideRoot(real, ws)) {
+          throw new JailError('bridge state is not agent-visible: ' + target);
+        }
       }
       return { real, root: realRoot };
     }
@@ -83,4 +95,4 @@ function safeOpen(real, flags, mode) {
   } catch (e) { fs.closeSync(fd); throw e; }
 }
 
-module.exports = { JailError, resolveInRoots, assertRegularFileOrDir, realpathOrSelf, safeOpen };
+module.exports = { JailError, resolveInRoots, assertRegularFileOrDir, realpathOrSelf, safeOpen, insideRoot };

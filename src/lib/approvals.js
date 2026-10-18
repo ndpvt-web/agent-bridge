@@ -3,6 +3,11 @@
 // the human at the Mac approves or denies with the CLI. Default deny, TTL,
 // single-use. State lives in a JSON file so the CLI process and the server
 // process share it (atomic tmp+rename writes; server re-reads on each poll).
+//
+// Single-use is strict: once execution starts, the approval can never run
+// again - a failed execution is 'consumed' with an error, not retryable
+// (a retryable failure let an agent poll a content check repeatedly until
+// it won a race).
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -12,8 +17,8 @@ const { withLock } = require('./lockfile');
 const APPROVAL_TTL_MS = 120 * 1000;
 const MAX_PENDING = 100;   // backlog cap: an agent cannot flood the human
 const MAX_PENDING_PER_AGENT = 25; // and one agent cannot starve the others
-const EXECUTING_STALE_MS = 10 * 60 * 1000; // a crashed execution is retryable
 const TERMINAL_KEPT = 200; // forensic retention for decided records
+const MAX_SUMMARY = 4000;  // the human reads the summary; never truncate it
 
 class Approvals {
   constructor(dir) {
@@ -21,6 +26,8 @@ class Approvals {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.path = path.join(dir, 'approvals.json');
     this.lockPath = path.join(dir, '.lock');
+    this.snapshotsDir = path.join(dir, 'snapshots');
+    this._pruneSnapshots();
   }
 
   // Cross-process mutex (shared lockfile helper, pid-liveness stale break).
@@ -36,16 +43,41 @@ class Approvals {
     try { fs.chmodSync(this.path, 0o600); } catch {}
   }
 
-  // kind: 'shell' | 'process' | 'delete' | 'write'
-  // Locked like decide/consume: a create racing a human decision must never
+  // Approval payloads may reference a frozen-file snapshot directory. Any
+  // snapshot not referenced by an open record is garbage (its approval was
+  // decided, expired, or pruned) and is removed.
+  _pruneSnapshots() {
+    let dirs;
+    try { dirs = fs.readdirSync(this.snapshotsDir); } catch { return; }
+    if (!dirs.length) return;
+    const live = new Set();
+    for (const a of this._read()) {
+      if (['pending', 'approved', 'executing'].includes(a.status) && a.payload && a.payload.snapshot_id) {
+        live.add(a.payload.snapshot_id);
+      }
+    }
+    for (const d of dirs) {
+      if (!live.has(d)) {
+        try { fs.rmSync(path.join(this.snapshotsDir, d), { recursive: true, force: true }); } catch {}
+      }
+    }
+  }
+
+  // kind: 'shell' | 'process' | 'delete'
+  // Locked like decide: a create racing a human decision must never
   // overwrite it.
   create({ kind, agentId, summary, payload, toolName }) {
+    summary = String(summary);
+    if (summary.length > MAX_SUMMARY) {
+      // NEVER decide on a truncated description: refuse instead.
+      const err = new Error('approval summary too long to show faithfully - shorten the command/argv');
+      err.code = 'summary_too_long';
+      throw err;
+    }
     const a = {
       id: 'apr_' + crypto.randomBytes(9).toString('base64url'),
       kind, agent_id: agentId,
-      // The human sees the summary; keep it faithful and complete enough to
-      // decide on (bounded so the store stays small).
-      summary: String(summary).slice(0, 4000),
+      summary,
       payload, // planned action, executed only after approval
       tool_name: toolName || null,
       status: 'pending',
@@ -102,18 +134,12 @@ class Approvals {
     ], { timeout: 3000 }, () => {});
   }
 
-  // Server-side poll. Returns 'pending' | 'approved' | 'denied' | 'expired' | 'unknown'
+  // Server-side poll. Returns 'pending' | 'approved' | 'denied' | 'expired' |
+  // 'executing' | 'consumed' | 'unknown'.
   status(id) {
     const a = this._read().find(x => x.id === id);
     if (!a) return { state: 'unknown' };
     if (a.status === 'pending' && Date.now() > a.expires_at) return { state: 'expired' };
-    // A server crash mid-execution must not brick the approval forever:
-    // an 'executing' record older than the staleness window is retryable.
-    if (a.status === 'executing' && a.execution_started_at &&
-        Date.now() - Date.parse(a.execution_started_at) > EXECUTING_STALE_MS) {
-      this.failExecution(id); // back to 'approved'
-      a.status = 'approved';
-    }
     return { state: a.status, approval: a };
   }
 
@@ -127,12 +153,12 @@ class Approvals {
       a.status = decision === 'approve' ? 'approved' : 'denied';
       a.decided_at = new Date().toISOString();
       this._write(list);
+      if (a.status === 'denied') this._pruneSnapshots();
       return { ok: true };
     });
   }
 
   // Two-phase execution lifecycle: approved -> executing -> consumed.
-  // A failed execution returns to 'approved' so the agent can retry.
   beginExecution(id) {
     return this._withLock(() => {
       const list = this._read();
@@ -145,31 +171,25 @@ class Approvals {
     });
   }
 
-  finishExecution(id) {
-    return this._withLock(() => {
+  // error (optional): the execution failed; the record is still consumed.
+  // Either way the approval can never execute again.
+  finishExecution(id, error) {
+    const r = this._withLock(() => {
       const list = this._read();
       const a = list.find(x => x.id === id);
       if (!a || a.status !== 'executing') return false;
       a.status = 'consumed';
       a.consumed_at = new Date().toISOString();
+      if (error) a.execution_error = String(error).slice(0, 300);
       this._write(list);
       return true;
     });
-  }
-
-  failExecution(id) {
-    return this._withLock(() => {
-      const list = this._read();
-      const a = list.find(x => x.id === id);
-      if (!a || a.status !== 'executing') return false;
-      a.status = 'approved'; // retryable
-      this._write(list);
-      return true;
-    });
+    this._pruneSnapshots();
+    return r;
   }
 
   expire(id) {
-    return this._withLock(() => {
+    const r = this._withLock(() => {
       const list = this._read();
       const a = list.find(x => x.id === id);
       if (!a) return false;
@@ -177,9 +197,8 @@ class Approvals {
       this._write(list);
       return true;
     });
+    this._pruneSnapshots();
+    return r;
   }
-
-  // Backwards-compatible single-shot consume (kept for older call sites).
-  consume(id) { return this.beginExecution(id) && this.finishExecution(id); }
 }
 module.exports = { Approvals, APPROVAL_TTL_MS };

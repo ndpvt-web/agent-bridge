@@ -12,10 +12,11 @@ const crypto = require('crypto');
 const { withLock } = require('./lockfile');
 
 class AuditLog {
-  constructor(filePath, hmacKey) {
+  constructor(filePath, hmacKey, { maxBytes = 64 * 1024 * 1024 } = {}) {
     this.path = filePath;
     this.lockPath = filePath + '.lock';
     this.key = hmacKey;
+    this.maxBytes = maxBytes;
     this.seq = 0;
     this.prev = '0'.repeat(64);
     this._readTail();
@@ -23,7 +24,9 @@ class AuditLog {
 
   // Re-read the chain head (last entry) from disk. Only the tail is read:
   // entry size is bounded (summaries are capped), so 32KB always covers the
-  // final complete line.
+  // final complete line. A torn last line (crash mid-append) is skipped:
+  // the chain continues from the last complete entry instead of wedging
+  // every later verification on a "sequence gap".
   _readTail() {
     try {
       const st = fs.statSync(this.path);
@@ -33,20 +36,36 @@ class AuditLog {
         const size = Math.min(st.size, 32768);
         const buf = Buffer.alloc(size);
         fs.readSync(fd, buf, 0, size, st.size - size);
-        const s = buf.toString('utf8').replace(/\n+$/, '');
-        const line = s.slice(s.lastIndexOf('\n') + 1);
-        if (!line) return;
-        const last = JSON.parse(line);
-        if (Number.isInteger(last.seq) && typeof last.mac === 'string') {
-          this.seq = last.seq;
-          this.prev = last.mac;
+        const lines = buf.toString('utf8').split('\n').filter(l => l.trim());
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const last = JSON.parse(lines[i]);
+            if (Number.isInteger(last.seq) && typeof last.mac === 'string') {
+              this.seq = last.seq;
+              this.prev = last.mac;
+              return;
+            }
+          } catch { continue; } // torn line: try the one before
         }
       } finally { fs.closeSync(fd); }
     } catch {}
   }
 
+  // Rotate when the log outgrows maxBytes: the old file is kept once as
+  // audit.jsonl.1 (verify checks both) and a fresh chain begins.
+  _rotateIfNeeded() {
+    try {
+      const st = fs.statSync(this.path);
+      if (st.size < this.maxBytes) return;
+      fs.renameSync(this.path, this.path + '.1');
+      this.seq = 0;
+      this.prev = '0'.repeat(64);
+    } catch {}
+  }
+
   record(entry) {
     return withLock(this.lockPath, () => {
+      this._rotateIfNeeded();
       this._readTail(); // another process may have appended since our last write
       const e = {
         seq: this.seq + 1,
@@ -65,10 +84,15 @@ class AuditLog {
   }
 
   static verify(filePath, hmacKey) {
-    const lines = fs.readFileSync(filePath, 'utf8').trim().split('\n').filter(Boolean);
+    let lines;
+    try {
+      lines = fs.readFileSync(filePath, 'utf8').trim().split('\n').filter(Boolean);
+    } catch { return { ok: true, entries: 0 }; }
     let prev = '0'.repeat(64);
     for (let i = 0; i < lines.length; i++) {
-      const e = JSON.parse(lines[i]);
+      let e;
+      try { e = JSON.parse(lines[i]); }
+      catch { return { ok: false, at: i, reason: 'unparseable entry (torn write or tampering)' }; }
       if (e.seq !== i + 1) return { ok: false, at: i, reason: 'sequence gap' };
       if (e.prev !== prev) return { ok: false, at: i, reason: 'chain break' };
       const { mac, ...rest } = e;

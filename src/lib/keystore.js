@@ -40,13 +40,17 @@ class KeyStore {
 
   // --- audit key (local only, never leaves the device) ---
   auditKey() {
-    let k = null;
-    try { k = fs.readFileSync(this.auditKeyPath, 'utf8').trim(); } catch {}
-    if (!k || k.length < 32) {
-      k = crypto.randomBytes(32).toString('hex');
-      fs.writeFileSync(this.auditKeyPath, k, { mode: 0o600 });
-    }
-    return k;
+    // Under the lock: a first concurrent start of CLI and server must not
+    // generate two keys (the loser's entries would fail verification).
+    return this._locked(() => {
+      let k = null;
+      try { k = fs.readFileSync(this.auditKeyPath, 'utf8').trim(); } catch {}
+      if (!k || k.length < 32) {
+        k = crypto.randomBytes(32).toString('hex');
+        fs.writeFileSync(this.auditKeyPath, k, { mode: 0o600 });
+      }
+      return k;
+    });
   }
 
   // --- pairing codes ---

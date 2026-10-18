@@ -14,8 +14,12 @@ class NonceCache {
   _bucket(agentId) {
     let m = this.map.get(agentId);
     if (!m) { m = new Map(); this.map.set(agentId, m); }
-    const now = Date.now();
-    for (const [n, exp] of m) { if (exp <= now) m.delete(n); }
+    // Prune expired nonces only when the bucket is big enough to matter;
+    // scanning the whole map on every request made each request O(cache).
+    if (m.size > 256) {
+      const now = Date.now();
+      for (const [n, exp] of m) { if (exp <= now) m.delete(n); }
+    }
     return m;
   }
   // Check WITHOUT recording. A nonce is burned only AFTER the request's
