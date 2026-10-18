@@ -24,11 +24,15 @@ AgentBridge runs a tiny, zero-dependency server on your Mac. Point your cloud ag
 ## Works with your agent
 
 <p>
-<a href="#works-with-your-agent"><img alt="Instinct" src="https://img.shields.io/badge/Instinct-7c3aed"></a>
-<a href="#works-with-your-agent"><img alt="ChatGPT / Codex" src="https://img.shields.io/badge/ChatGPT%20%2F%20Codex-74aa9c?logo=openai&logoColor=white"></a>
-<a href="#works-with-your-agent"><img alt="Claude" src="https://img.shields.io/badge/Claude-191919?logo=anthropic&logoColor=white"></a>
-<a href="#works-with-your-agent"><img alt="Cursor" src="https://img.shields.io/badge/Cursor-000000?logo=cursor&logoColor=white"></a>
-<a href="#works-with-your-agent"><img alt="Meta Muse" src="https://img.shields.io/badge/Meta%20Muse-0668E1?logo=meta&logoColor=white"></a>
+  <img src="assets/logos/instinct.png" alt="Instinct" height="64">
+  &nbsp;&nbsp;&nbsp;
+  <img src="assets/logos/openai.svg" alt="ChatGPT / Codex" height="40">
+  &nbsp;&nbsp;&nbsp;
+  <img src="assets/logos/anthropic.svg" alt="Claude" height="40">
+  &nbsp;&nbsp;&nbsp;
+  <img src="assets/logos/cursor.svg" alt="Cursor" height="40">
+  &nbsp;&nbsp;&nbsp;
+  <img src="assets/logos/meta.svg" alt="Meta Muse" height="40">
 </p>
 
 
