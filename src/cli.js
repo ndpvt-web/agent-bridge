@@ -14,6 +14,7 @@ const keystore = new KeyStore(path.join(installDir, 'secrets'));
 const approvals = new Approvals(path.join(installDir, 'approvals'));
 const cfg = loadConfig(installDir);
 const audit = new AuditLog(path.join(installDir, 'logs', 'audit.jsonl'), keystore.auditKey());
+const { ensureDiscovery, loadDiscovery } = require('./lib/discovery');
 
 // Programs that are shells in disguise: granting them to an agent grants
 // full code execution for that agent. We allow it - the human owns the Mac -
@@ -97,6 +98,20 @@ switch (cmd) {
     console.log('    ' + code);
     console.log('');
     console.log('Paste it to your cloud agent together with your tunnel URL (see: agent-bridge status).');
+    try {
+      const disc = loadDiscovery(installDir);
+      if (disc) {
+        console.log('Self-heal link (give it too - if the tunnel address ever changes, the agent finds the new one here):');
+        console.log('');
+        console.log('    ' + disc.read_url);
+        console.log('');
+      } else {
+        // Kick off inbox creation in the background; the urlwatch service
+        // also creates it on boot and on every tunnel rotation.
+        ensureDiscovery(installDir).catch(() => {});
+        console.log('(Self-heal link not created yet - the background watcher will set it up. Run `agent-bridge status` in a minute to see it.)');
+      }
+    } catch { console.log('(Self-heal link unavailable right now - the watcher will create it in the background.)'); }
     break;
   }
   case 'agents': {
@@ -201,7 +216,9 @@ switch (cmd) {
     console.log('  workspace   : ' + cfg.workspace_root);
     console.log('  read roots  : ' + JSON.stringify([cfg.workspace_root, ...(cfg.read_roots_extra || [])]));
     console.log('  agents      : ' + keystore.listAgents().filter(a => !a.revoked).length + ' active');
-    try { console.log('  tunnel URL  : ' + fs.readFileSync(path.join(installDir, '.tunnel-url'), 'utf8').trim() + '  (quick tunnels change on reconnect)'); } catch { console.log('  tunnel URL  : (unknown yet - check logs/tunnel.log)'); }
+    try { console.log('  tunnel URL  : ' + fs.readFileSync(path.join(installDir, '.tunnel-url'), 'utf8').trim() + '  (auto-updates on reconnect)'); } catch { console.log('  tunnel URL  : (unknown yet - check logs/tunnel.log)'); }
+    const disc = loadDiscovery(installDir);
+    if (disc) console.log('  self-heal   : ' + disc.read_url);
     break;
   }
   case 'mode': {

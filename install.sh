@@ -230,11 +230,33 @@ cat > "$LAUNCHD_DIR/com.agentbridge.tunnel.plist" << PLIST
   <key>StandardErrorPath</key><string>${LOG_DIR}/tunnel.log</string>
 </dict></plist>
 PLIST
+cat > "$LAUNCHD_DIR/com.agentbridge.urlwatch.plist" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.agentbridge.urlwatch</string>
+  <key>ProgramArguments</key>
+  <array><string>${NODE_BIN}</string><string>${BRIDGE_DIR}/src/urlwatch.js</string></array>
+  <key>WorkingDirectory</key><string>${BRIDGE_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AGENT_BRIDGE_HOME</key><string>${BRIDGE_DIR}</string>
+    <key>HOME</key><string>${HOME}</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/><key>NetworkState</key><true/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>${LOG_DIR}/urlwatch.log</string>
+  <key>StandardErrorPath</key><string>${LOG_DIR}/urlwatch.log</string>
+</dict></plist>
+PLIST
 launchctl unload "$LAUNCHD_DIR/com.agentbridge.server.plist" 2>/dev/null || true
 launchctl unload "$LAUNCHD_DIR/com.agentbridge.tunnel.plist" 2>/dev/null || true
+launchctl unload "$LAUNCHD_DIR/com.agentbridge.urlwatch.plist" 2>/dev/null || true
 : > "$LOG_DIR/tunnel.log"
 launchctl load "$LAUNCHD_DIR/com.agentbridge.server.plist"
 launchctl load "$LAUNCHD_DIR/com.agentbridge.tunnel.plist"
+launchctl load "$LAUNCHD_DIR/com.agentbridge.urlwatch.plist"
 ok "launchd services loaded"
 
 # --- Wait for tunnel URL ---
@@ -257,6 +279,8 @@ read -r -p "Continue? [y/N] " a
 [[ "$a" == "y" || "$a" == "Y" ]] || { echo "Aborted."; exit 1; }
 launchctl unload ~/Library/LaunchAgents/com.agentbridge.server.plist 2>/dev/null || true
 launchctl unload ~/Library/LaunchAgents/com.agentbridge.tunnel.plist 2>/dev/null || true
+launchctl unload ~/Library/LaunchAgents/com.agentbridge.urlwatch.plist 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.agentbridge.urlwatch.plist
 rm -f ~/Library/LaunchAgents/com.agentbridge.server.plist ~/Library/LaunchAgents/com.agentbridge.tunnel.plist ~/.local/bin/agent-bridge
 if [[ "${1:-}" == "--purge" ]]; then
   rm -rf ~/agent-bridge

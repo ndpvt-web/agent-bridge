@@ -13,7 +13,7 @@
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)]()
 [![GitHub release](https://img.shields.io/github/v/release/ndpvt-web/agent-bridge)](https://github.com/ndpvt-web/agent-bridge/releases/latest)
 [![GitHub stars](https://img.shields.io/github/stars/ndpvt-web/agent-bridge?cacheSeconds=3600)](https://github.com/ndpvt-web/agent-bridge/stargazers)
-[![Tests: 306 passing](https://img.shields.io/badge/tests-306%20passing-brightgreen)]()
+[![Tests: 326 passing](https://img.shields.io/badge/tests-326%20passing-brightgreen)]()
 
 [Quick Start](#quick-start) · [Two Modes](#two-modes) · [Security](#how-it-stays-safe) · [Docs](docs)
 
@@ -57,10 +57,11 @@ One command sets everything up. No Homebrew, no npm, no account - about a minute
    Use my AgentBridge to work on my Mac.
    Tunnel: https://your-words-here.trycloudflare.com
    Pairing code: 123456
+   Self-heal link: https://webhook.site/token/your-id/requests?sorting=newest
    Protocol: https://github.com/ndpvt-web/agent-bridge/blob/main/docs/protocol.md
    ```
 
-   The agent connects itself. Approvals always happen on your Mac.
+   The agent connects itself. Approvals always happen on your Mac. If the tunnel ever restarts and gets a new address, the new one shows up at the self-heal link automatically - the agent checks it and reconnects, you never paste again. (The link is a free webhook.site inbox, no account; it carries only the tunnel address, never keys or data.)
 
 ## You approve what matters
 
@@ -116,7 +117,7 @@ Every request is Ed25519-signed by a paired agent and checked against a strict a
 
 ## Limitations and roadmap
 
-macOS only for now · native `mcp.json` adapter not built yet (MCP-style JSON-RPC already works) · free tunnel URLs rotate on restart - run `agent-bridge pair` again.
+macOS only for now · native `mcp.json` adapter not built yet (MCP-style JSON-RPC already works) · self-heal link needs the free webhook.site service to be reachable.
 
 ## Docs
 

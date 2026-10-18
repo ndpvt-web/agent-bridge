@@ -69,7 +69,7 @@ check "config bind loopback" "$(node -p "JSON.parse(require('fs').readFileSync('
 check "no injected keys" "$(node -p "Object.keys(JSON.parse(require('fs').readFileSync('$CFG','utf8'))).join(',')" 2>/dev/null)" "port,bind,profile_default,enable_shell,mode"
 check "src extracted" "$([ -f "$FAKE/home/agent-bridge/src/server.js" ] && echo y)" "y"
 check "src perms locked" "$(stat -c %a "$FAKE/home/agent-bridge/src/server.js")" "600"
-check "server plists written" "$(ls "$FAKE/home/Library/LaunchAgents/" 2>/dev/null | wc -l)" "2"
+check "server plists written (server+tunnel+urlwatch)" "$(ls "$FAKE/home/Library/LaunchAgents/" 2>/dev/null | wc -l)" "3"
 check "uninstaller written" "$([ -x "$FAKE/home/agent-bridge/uninstall.sh" ] && echo y)" "y"
 
 echo "=== installer: re-run keeps config, banner shows EFFECTIVE config ==="

@@ -23,6 +23,26 @@ The code comes from `agent-bridge pair` on the Mac (10 min TTL, single-use).
 The agent generates and keeps its own Ed25519 keypair; the private key
 never crosses the wire.
 
+## Tunnel URL self-healing (discovery inbox)
+
+Quick tunnels get a NEW random address every time cloudflared restarts.
+So you never have to ask the user to re-paste: `agent-bridge pair` also
+prints a **self-heal link** (a free webhook.site inbox, no account). A
+watcher on the Mac posts ONLY the current tunnel URL there on every
+rotation. The inbox never carries keys, codes, or request content - the
+tunnel URL alone grants nothing; every call still needs your paired key.
+
+If your stored tunnel URL stops answering:
+
+```
+GET <self-heal link>            # .../requests?sorting=newest&per_page=1
+-> { "data": [ { "content": "{\"tunnel_url\":\"https://...\",\"ts\":\"...\"}" } ] }
+```
+
+Parse `data[0].content` as JSON, take `tunnel_url`, verify it matches
+`https://*.trycloudflare.com`, and reconnect. Keep using your existing
+keypair - pairing survives restarts.
+
 ## Signed requests
 
 Every `POST /mcp` carries:
