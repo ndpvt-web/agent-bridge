@@ -43,7 +43,14 @@ function resolveInRoots(target, roots, anchor, opts = {}) {
   let cur = abs;
   const tail = [];
   for (;;) {
-    try { fs.lstatSync(cur); break; } catch {}
+    try { fs.lstatSync(cur); break; } catch (e) {
+      // Only "not there" keeps the walk going; anything else (a path over
+      // the OS limit, a permissions failure) is a clean refusal, never an
+      // internal error.
+      if (!e || (e.code !== 'ENOENT' && e.code !== 'ENOTDIR')) {
+        throw new JailError('cannot resolve path (' + (e && e.code || 'error') + '): ' + target.slice(0, 120));
+      }
+    }
     const parent = path.dirname(cur);
     if (parent === cur) break; // reached filesystem root without existing
     tail.unshift(path.basename(cur));

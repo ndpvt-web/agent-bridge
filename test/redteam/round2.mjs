@@ -9,6 +9,7 @@ import { BridgeClient } from '../client.mjs';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ab-rt2-'));
 const ws = path.join(tmp, 'workspace');
 fs.mkdirSync(ws, { recursive: true });
+fs.writeFileSync(path.join(ws, 'package.json'), '{"name":"fixture"}\n');
 
 let inst = await startServer(tmp, { port: 0 });
 const keystore = new KeyStore(path.join(tmp, 'secrets'));
@@ -34,9 +35,15 @@ console.log('\n=== Round 2: allowlist-is-not-a-shell ===');
     const r = await c.call('process.run', { argv: [prog, '--version'] });
     check(`'${prog}' requires approval`, isPending(r), JSON.stringify(r.rpc).slice(0, 100));
   }
-  for (const prog of ['ls', 'cat', 'grep', 'jq']) {
+  for (const prog of ['ls', 'cat', 'grep', 'sort']) {
     const r = await c.call('process.run', { argv: [prog, prog === 'cat' ? 'package.json' : prog === 'ls' ? '.' : prog === 'grep' ? '--help' : '--version'] });
     check(`'${prog}' auto-allowed (inspection tool)`, !isPending(r) && !r.rpc.error, JSON.stringify(r.rpc).slice(0, 100));
+  }
+  // jq is NOT auto-allowed anymore: its module `import ... {search:...}`
+  // reads any *.json on disk (round-4 HIGH). Same for uniq (output operand).
+  for (const prog of ['jq', 'uniq', 'which']) {
+    const r = await c.call('process.run', { argv: [prog, '--version'] });
+    check(`'${prog}' requires approval (removed from auto-allow)`, isPending(r) || !!r.rpc.error, JSON.stringify(r.rpc).slice(0, 100));
   }
 }
 

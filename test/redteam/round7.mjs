@@ -64,7 +64,7 @@ console.log('\n=== R7-2: nonexistent-in-workspace argv operand refuses the plan 
   check('no pending approval leaked', !isPending(r));
 }
 
-console.log('\n=== R7-3: argv[0] content swap after approval is refused at execute (HIGH-1/F2) ===');
+console.log('\n=== R7-3: argv content swap after approval runs the FROZEN copy (round-4 root fix) ===');
 {
   fs.writeFileSync(path.join(ws, 'swap.sh'), 'echo good\n');
   const r = await cSwap.call('process.run', { argv: ['sh', 'swap.sh'] });
@@ -75,8 +75,8 @@ console.log('\n=== R7-3: argv[0] content swap after approval is refused at execu
   fs.writeFileSync(path.join(ws, 'swap.sh'), 'echo PWNED\n');
   const st = await cSwap.call('approval.status', { approval_id: apid });
   const s = st.rpc?.result?.structuredContent;
-  check('swapped content refused', s?.status !== 'executed', JSON.stringify(s).slice(0, 160));
-  check('refusal says content changed', /changed|vanished/i.test(JSON.stringify(s) + JSON.stringify(st.rpc?.error || '')));
+  check('frozen copy executes', s?.status === 'executed', JSON.stringify(s).slice(0, 160));
+  check('output is the APPROVED content, not the swap', s?.result?.stdout === 'good\n', JSON.stringify(s?.result?.stdout));
   fs.writeFileSync(path.join(ws, 'swap.sh'), 'echo good\n');
 }
 
@@ -92,7 +92,7 @@ console.log('\n=== R7-4: approval summary warns about indirect reads (interprete
   if (pend2) approvals.decide(pend2.id, 'deny');
 }
 
-console.log('\n=== R7-4b: post-approval rewrite of a required module is refused (P1) ===');
+console.log('\n=== R7-4b: post-approval rewrite of a required module is frozen out (round-4) ===');
 {
   fs.writeFileSync(path.join(ws, 'main.js'), 'require("./helper.js");\n');
   fs.writeFileSync(path.join(ws, 'helper.js'), 'console.log("good")\n');
@@ -100,12 +100,12 @@ console.log('\n=== R7-4b: post-approval rewrite of a required module is refused 
   check('node main.js requires approval', isPending(r), JSON.stringify(r.rpc).slice(0, 140));
   const apid = r.rpc.result.structuredContent.approval_id;
   const rec = readStore().find(a => a.id === apid);
-  check('approval summary counts bound modules', /bound module/.test(rec.summary), rec.summary);
+  check('approval summary reports frozen files', /frozen/.test(rec.summary), rec.summary);
   approvals.decide(apid, 'approve');
   fs.writeFileSync(path.join(ws, 'helper.js'), 'require("fs").writeFileSync("/tmp/RT7PWNED","x")\n');
   const st = await cSwap.call('approval.status', { approval_id: apid });
   const sj = JSON.stringify(st.rpc);
-  check('rewritten dependency refused at execute', !sj.includes('"executed"') && /changed|vanished/.test(sj), sj.slice(0, 160));
+  check('frozen dependency executes the APPROVED content', sj.includes('"executed"') && sj.includes('good'), sj.slice(0, 200));
   check('payload never ran', !fs.existsSync('/tmp/RT7PWNED'));
   fs.writeFileSync(path.join(ws, 'helper.js'), 'console.log("good")\n');
 }
@@ -141,17 +141,24 @@ console.log('\n=== R7-8: FULL mode: no jail, no approvals, shell on ===');
   const inst2 = await startServer(tmp2, { port: 0 });
   const base2 = `http://127.0.0.1:${inst2.port}`;
   const ks2 = new KeyStore(path.join(tmp2, 'secrets'));
-  const code = ks2.createPairingCode('workspace');
+  const code = ks2.createPairingCode('developer');
   const c = new BridgeClient(base2);
   const pr = await c.pair(code, 'r7-full');
   check('full-mode pair works', pr.status === 200, 'got ' + pr.status);
 
   const sh = await c.call('shell.exec', { command: 'echo fullmode-ok' });
   const shOut = sh.rpc?.result?.structuredContent?.stdout || '';
-  // Executes directly (no approval). /bin/zsh is macOS-only, so on this Linux
-  // sandbox the spawn itself may ENOENT - either outcome proves the gate is off.
   const shErr = JSON.stringify(sh.rpc);
   check('shell.exec runs without approval in full mode', shOut.includes('fullmode-ok') || /ENOENT|spawn/.test(shErr), shErr.slice(0, 160));
+  // ... but profiles STILL apply in full mode (round-4 fix): a readonly
+  // agent gets no shell, no process.run, no writes even there.
+  const roCode = ks2.createPairingCode('readonly');
+  const cro = new BridgeClient(base2);
+  await cro.pair(roCode, 'r7-full-ro');
+  const roSh = await cro.call('shell.exec', { command: 'id' });
+  check('readonly agent gets no shell in FULL mode', !!roSh.rpc?.error && /forbidden/.test(roSh.rpc.error.message), JSON.stringify(roSh.rpc).slice(0, 140));
+  const roRun = await cro.call('process.run', { argv: ['id'] });
+  check('readonly agent gets no process.run in FULL mode', !!roRun.rpc?.error);
 
   const etc = await c.call('fs.read', { path: '/etc/hosts' });
   check('fs.read /etc/hosts allowed in full mode', !!etc.rpc?.result?.structuredContent?.content, JSON.stringify(etc.rpc).slice(0, 120));

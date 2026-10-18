@@ -16,6 +16,7 @@ const ws = path.join(tmp, 'workspace');
 fs.mkdirSync(ws, { recursive: true });
 fs.writeFileSync(path.join(ws, 'data.txt'), 'hello\nworld\n');
 fs.writeFileSync(path.join(ws, 'j.json'), '{"a":1}\n');
+fs.writeFileSync(path.join(ws, 'sums.txt'), 'deadbeef  data.txt\n');
 fs.writeFileSync(path.join(ws, 'run.js'), 'console.log("original")\n');
 const outside = path.join(tmp, 'outside');
 fs.mkdirSync(outside);
@@ -102,11 +103,11 @@ console.log('\n=== R6-3: platform grammar (stat), shasum -c, jq isolation ===');
   check('shasum -c needs approval', isPending(r));
   r = await c.call('process.run', { argv: ['shasum', 'data.txt'] });
   check('shasum data.txt auto-runs', ran(r));
-  // jq: HOME isolated - env.HOME is not the real home, and no ~/.jq loads
+  // jq is no longer auto-allowed (module import jail escape, round-4 HIGH).
+  // 'env.HOME' looks like a missing path operand, so the request is refused
+  // outright - either way jq never runs.
   r = await c.call('process.run', { argv: ['jq', '-n', 'env.HOME'] });
-  check('jq -n env.HOME runs', ran(r));
-  const home = (r.rpc?.result?.structuredContent?.stdout || '').trim().replace(/"/g, '');
-  check('jq HOME is isolated', home.endsWith('empty-home'), home);
+  check('jq -n never runs', !ran(r), JSON.stringify(r.rpc).slice(0, 120));
 }
 
 console.log('\n=== R6-4: shell.exec profile gate; fs.read directory + audit path ===');
@@ -137,7 +138,8 @@ console.log('\n=== R6-5: approvals - retention, pending cap, content binding, in
   catch (e) { threw = e.code === 'too_many_pending'; }
   check('pending cap (100) throws too_many_pending', threw);
 
-  // content binding: approve "node run.js", swap content, execution must fail
+  // frozen binding: approve "node run.js", swap content - the FROZEN copy
+  // runs (post-approval edits cannot affect an approved run, round-4 fix)
   const c = await pairedClient('r6-f5');
   const r1 = await c.call('process.run', { argv: ['node', 'run.js'] });
   check('node run.js needs approval', isPending(r1));
@@ -146,8 +148,12 @@ console.log('\n=== R6-5: approvals - retention, pending cap, content binding, in
   await c.call('fs.write', { path: 'run.js', content_base64: Buffer.from('require("fs").writeFileSync("/tmp/R6PWNED","")').toString('base64'), mode: 'overwrite' });
   const st = await c.call('approval.status', { approval_id: approvalId });
   const status = st.rpc?.result?.structuredContent?.status;
-  check('swapped script does NOT execute', status === 'execution_failed', status);
+  check('frozen copy executes (edit ignored)', status === 'executed', status);
+  check('frozen stdout is the ORIGINAL content', st.rpc?.result?.structuredContent?.result?.stdout === 'original\n', JSON.stringify(st.rpc?.result?.structuredContent?.result?.stdout));
   check('no marker written', !fs.existsSync('/tmp/R6PWNED'));
+  // and the run is strictly single-use: a second poll does not re-execute
+  const st2 = await c.call('approval.status', { approval_id: approvalId });
+  check('single-use after frozen execution', st2.rpc?.result?.structuredContent?.status === 'already_executed');
 
   // inode binding on fs.delete: approve, replace file, execution must fail
   fs.writeFileSync(path.join(ws, 'victim.txt'), 'v1');

@@ -174,20 +174,32 @@ function freezeArgvFiles(argv, cwd, cfg) {
     if (a.startsWith('~')) {
       throw new ToolError('invalid_params', "'~' is not expanded for process operands - use an absolute or workspace-relative path: " + a.slice(0, 80));
     }
+    // The operand right after a '-'-flag is that flag's VALUE (code for
+    // -e/-c, a pattern, a name) - its text is already fully visible in the
+    // approval summary, so it is never a missing path to bind. (An existing
+    // workspace file in that slot is still frozen below.)
+    const flagValue = k > 0 && argv[k - 1].startsWith('-');
+    // A component over NAME_MAX (255) can never exist as a file, so it is
+    // never a legit path operand - refuse it cleanly instead of walking.
+    if (!flagValue && a.split('/').some(seg => seg.length > 255)) {
+      throw new ToolError('unbindable', 'cannot approve: path component longer than 255 chars');
+    }
     let real;
     try { real = resolveInRoots(a, [ws], cwd).real; } catch { continue; } // not a workspace operand: approved as text
     let st;
     try { st = fs.lstatSync(real); } catch (e) {
       if (e && e.code === 'ENOENT') {
-        // A path-intended operand (contains '/' or has an extension) that
-        // does not exist yet must NOT be approved: the human would approve
-        // content they never saw (the agent writes it after approval).
-        if (a.includes('/') || path.extname(a)) {
+        // A path-intended operand that does not exist yet must NOT be
+        // approved: the human would approve content they never saw (the
+        // agent writes it after approval). Path-intended = contains '/', or
+        // carries a plausible file extension (so `node -e 'code...'`,
+        // subcommands and make targets stay plain text).
+        if (!flagValue && (a.includes('/') || /^\.[A-Za-z0-9]{1,10}$/.test(path.extname(a)))) {
           throw new ToolError('unbindable', 'cannot approve: ' + a + ' does not exist yet inside the workspace - create it first, then request approval');
         }
-        continue; // bare word (subcommand, make target): approved as text
+        continue; // bare word (subcommand, make target or flag value): approved as text
       }
-      throw e;
+      throw new ToolError('unbindable', 'cannot approve: ' + a.slice(0, 120) + ' is not a readable file (' + (e && e.code || 'error') + ')');
     }
     if (st.isSymbolicLink()) throw new ToolError('unbindable', 'cannot approve a symlinked program/input: ' + a);
     if (!st.isFile()) continue; // directory operand (e.g. `ls .`): approved as text
@@ -202,6 +214,7 @@ function freezeArgvFiles(argv, cwd, cfg) {
   const snapshotDir = path.join(cfg.install_dir, 'approvals', 'snapshots', snapshotId);
   const rewrite = {};
   const frozen = [];
+  const budget = { files: 0, bytes: 0 }; // sibling-context copy budget
   try {
     for (const f of named) {
       const dest = path.join(snapshotDir, f.rel);
@@ -213,7 +226,6 @@ function freezeArgvFiles(argv, cwd, cfg) {
     }
     // Sibling files of each named file (bounded, symlinks skipped), so a
     // frozen script's relative imports resolve inside the frozen tree.
-    const budget = { files: 0, bytes: 0 };
     const dirs = new Set(named.map(f => path.dirname(f.real)));
     for (const d of dirs) freezeContext(d, ws, snapshotDir, budget);
     // Tear check for the NAMED files: the copy must match the source as

@@ -30,7 +30,7 @@ const list = await agent.rpc('tools/list');
 check('tools/list returns catalog', (list.data.result?.tools || []).length >= 8);
 
 const info = await agent.call('system.info');
-check('system.info works', info.rpc.result?.structuredContent?.bridge?.version === '2.0.0');
+check('system.info works', info.rpc.result?.structuredContent?.bridge?.version === '2.1.0');
 
 // Agent workflow: create a project file, read it back, list the dir
 const w = await agent.call('fs.write', { path: 'project/notes.md', content_base64: Buffer.from('# hello\n').toString('base64') });

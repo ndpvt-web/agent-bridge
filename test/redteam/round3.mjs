@@ -40,7 +40,7 @@ console.log('\n=== Round 3: allowlisted tool as jail escape ===');
     ['grep', 'root', '/etc/passwd'],
     ['rg', 'root', '/etc/'],
     ['ls', '/'],
-    ['ls', '~'],
+    ['which', 'node'],
     ['jq', '.', '/etc/passwd'],
     ['shasum', '/etc/passwd'],
     ['wc', '/etc/passwd'],
@@ -48,6 +48,11 @@ console.log('\n=== Round 3: allowlisted tool as jail escape ===');
   ]) {
     const r = await c.call('process.run', { argv });
     check(`${JSON.stringify(argv)} requires approval`, isPending(r), JSON.stringify(r.rpc).slice(0, 120));
+  }
+  // '~' operands are rejected outright (spawn does not expand them)
+  {
+    const r = await c.call('process.run', { argv: ['ls', '~'] });
+    check(`["ls","~"] rejected (no tilde expansion)`, isPending(r) || !!r.rpc.error, JSON.stringify(r.rpc).slice(0, 120));
   }
   // and the legit uses still auto-run
   for (const argv of [['ls', '.'], ['cat', 'in.txt'], ['grep', 'in', 'in.txt'], ['echo', 'hello'], ['date'], ['ls', '-la', '.']]) {

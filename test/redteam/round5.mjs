@@ -55,15 +55,20 @@ console.log('\n=== Round 5: F1 - flags are not free (the critical) ===');
     check(`${JSON.stringify(argv)} needs approval`, isPending(r), JSON.stringify(r.rpc).slice(0, 120));
   }
   check('nothing executed', !fs.existsSync(path.join(tmp, 'PWNED')));
+  // Removed from auto-allow in round 4: jq (module import reads any *.json),
+  // uniq (second positional is an output file).
+  for (const argv of [['jq', '-r', '.a', 'j.json'], ['uniq', 'data.txt']]) {
+    const r = await c.call('process.run', { argv });
+    check(`${JSON.stringify(argv)} needs approval now`, isPending(r), JSON.stringify(r.rpc).slice(0, 120));
+  }
   // legit grammar uses still auto-run
   for (const argv of [
     ['ls', '-la', '.'], ['cat', 'data.txt'], ['cat', '-n', 'data.txt'],
     ['grep', '-i', 'A', 'data.txt'], ['head', '-n', '5', 'data.txt'], ['head', '-n5', 'data.txt'],
     ['sort', '-n', 'data.txt'], ['sort', '-u', 'data.txt'], ['wc', '-l', 'data.txt'],
-    ['jq', '-r', '.a', 'j.json'], ['jq', '--raw-output', '.a', 'j.json'],
     ['shasum', '-a', '256', 'data.txt'], ['date', '+%Y'], ['echo', 'hello', 'world'],
     ['grep', '-m', '2', '-i', 'a', 'data.txt'], ['rg', '-i', 'a', 'data.txt'],
-    ['diff', '-u', 'data.txt', 'data.txt'], ['uniq', 'data.txt'],
+    ['diff', '-u', 'data.txt', 'data.txt'],
   ]) {
     const r = await c.call('process.run', { argv });
     check(`${JSON.stringify(argv)} auto-allowed`, !isPending(r) && !r.rpc.error, JSON.stringify(r.rpc).slice(0, 140));
