@@ -8,9 +8,11 @@
 - **One command** — installs Node (pinned + checksum-verified), cloudflared, the bridge, and 24/7 auto-start via launchd
 
 ```
-curl -fsSL https://raw.githubusercontent.com/<you>/agent-bridge/main/dist/install-agent-bridge.sh | bash
+curl -fsSL https://github.com/<you>/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
 agent-bridge pair
 ```
+
+(Or clone the repo and build the installer locally: `bash scripts/build-installer.sh`.)
 
 Paste the one-time pairing code and tunnel URL into your cloud agent. Done.
 
@@ -67,7 +69,7 @@ See [docs/threat-model.md](docs/threat-model.md) for the full analysis and [SECU
 
 ```bash
 # 1. Install (macOS, Apple Silicon or Intel)
-curl -fsSL https://raw.githubusercontent.com/<you>/agent-bridge/main/dist/install-agent-bridge.sh | bash
+curl -fsSL https://github.com/<you>/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
 
 # 2. Pair an agent (prints a one-time code, valid 10 minutes)
 agent-bridge pair                    # default: workspace profile

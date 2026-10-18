@@ -6,7 +6,7 @@
   "bin": { "agent-bridge": "src/cli.js" },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/",
+    "test": "node test/redteam/run.mjs && node test/redteam/round2.mjs && node test/redteam/round3.mjs && node test/redteam/round4.mjs",
     "redteam": "node test/redteam/run.mjs"
   },
   "engines": { "node": ">=18" },
