@@ -7,7 +7,7 @@
 
 # AgentBridge
 
-**Connect your cloud AI agent to your Mac in one command.** It can run Terminal commands, work with your local files and folders, even build and run apps in the iOS simulator - and anything risky waits for your yes. What you approve is exactly what runs.
+**Let your Instinct, Meta Muse, or Cursor cloud agent run Terminal commands and use local files on your Mac - safely.** Works with any cloud AI agent that can make HTTPS requests; anything risky waits for your yes.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)]()
@@ -15,9 +15,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/ndpvt-web/agent-bridge?cacheSeconds=3600)](https://github.com/ndpvt-web/agent-bridge/stargazers)
 [![Tests: 306 passing](https://img.shields.io/badge/tests-306%20passing-brightgreen)]()
 
-[Quick Start](#quick-start) · [Approvals](#you-approve-what-matters) · [Two Modes](#two-modes) · [Security](#how-it-stays-safe) · [Docs](docs)
-
-**Works with your agent**
+[Quick Start](#quick-start) · [Two Modes](#two-modes) · [Security](#how-it-stays-safe) · [Docs](docs)
 
 <table>
   <tr>
@@ -31,9 +29,7 @@
 
 </div>
 
-AgentBridge is a small app that lives on your Mac and lets your cloud AI agent - Claude, ChatGPT, Cursor, or any agent that can make HTTPS requests - actually use your Mac: execute commands in Terminal, read and write your local files and folders, run scripts, even drive apps like the iOS simulator.
-
-You stay in charge. In **SAFE** mode, everyday read-only work runs freely inside a folder you choose. Anything risky - deleting files, changing settings, reaching outside that folder - stops and waits for your yes at your own keyboard. In **FULL** mode the agent can do anything, as you. Nothing can approve itself, and every action is signed and logged, so you can always see exactly what happened.
+**What your agent can do on your Mac:** run Terminal commands and scripts, read and write local files and folders, even build and run apps in the iOS simulator. Anything risky - deleting files, changing settings, reaching outside your chosen folder - stops and waits for your yes at your own keyboard.
 
 ## Quick start
 
@@ -55,7 +51,7 @@ One command sets everything up. No Homebrew, no npm, no account - about a minute
    ```
 
    Done when you see **AGENTBRIDGE INSTALLED**. If your shell later says `command not found`, run `export PATH="$HOME/.local/bin:$PATH"` once and try again.
-3. **Connect your agent** - run `agent-bridge pair`. It prints two things: a **tunnel URL** (a temporary, encrypted address that lets your cloud agent reach your Mac through a Cloudflare tunnel) and a **one-time pairing code**. Paste both into your agent's chat, like this:
+3. **Connect your agent** - run `agent-bridge pair`. It prints a **tunnel URL** (a temporary, encrypted address your agent uses to reach your Mac) and a **one-time pairing code**. Paste both into your agent's chat:
 
    ```
    Use my AgentBridge to work on my Mac.
@@ -68,26 +64,24 @@ One command sets everything up. No Homebrew, no npm, no account - about a minute
 
 ## You approve what matters
 
-Risky actions never run silently - they wait for your decision at the keyboard:
+Risky actions wait for your decision at the keyboard - nothing else can approve for you:
 
 <p align="center">
   <img src="assets/approval-flow.png" alt="A pending request shown by agent-bridge pending, then approved once with agent-bridge approve" width="680">
 </p>
 
-The yes has to come from your keyboard, on your Mac. Nothing else - not a pipe, not a script, not the agent - can approve for you.
-
 ## Two modes
 
 | Mode | What the agent can do |
 | --- | --- |
-| **SAFE** (default) | Work inside one folder you choose. Everyday read-only commands run freely; anything risky waits for your approval on the Mac. |
-| **FULL** | Anything, as you. No jail, no approvals. Only if you trust the agent completely. |
+| **SAFE** (default) | Work inside one folder you choose; anything risky waits for your approval. |
+| **FULL** | Anything, as you. No jail, no approvals. |
 
-SAFE is the default and never changes silently. Switching to FULL shows one clear warning, asks you to confirm, and logs the switch:
+Switch anytime - changing to FULL warns, asks you to confirm, and logs the switch:
 
 ```bash
-agent-bridge mode full    # warns, asks you to confirm, logs the switch
-agent-bridge mode safe    # back to safe
+agent-bridge mode full
+agent-bridge mode safe
 ```
 
 ## How it works
@@ -112,34 +106,17 @@ agent-bridge deny <id>         # say no
 agent-bridge agents            # who is connected
 agent-bridge revoke <name>     # cut an agent off
 agent-bridge audit             # tamper-evident log of everything
-agent-bridge audit --verify    # check the log's integrity
 agent-bridge trash             # browse and restore deleted files
 ~/agent-bridge/uninstall.sh    # remove the bridge (keeps your files)
 ```
 
 ## How it stays safe
 
-1. **Signed requests** - every call is Ed25519-signed by a paired agent key. No key, no access. Captured requests can't be replayed.
-2. **Strict allowlist** - 21 read-only programs with per-program argument rules. Everything else needs your approval.
-3. **Filesystem jail** - realpath-checked; symlink escapes and writes through links are refused.
-4. **Frozen approvals** - named files are copied into a private snapshot at request time, and the run executes the copies. Approvals work once, expire in 120 seconds, and default to deny.
-5. **Tamper-evident audit log** - hash-chained; edits to history show up as tampering.
-
-Install downloads are version-pinned and SHA-256-verified, fail-closed, with no unverified system-binary fallback.
-
-## Why AgentBridge
-
-- **You stay in charge** - risky commands, deletions, and shell access wait for your yes on the Mac itself
-- **No bait-and-switch** - approving a command freezes a private copy of every file it names, and the run executes the copies
-- **Your files stay in a jail** - the agent sees only the folder you choose; writes are versioned, deletes go to a trash folder
-- **Every action is logged** - a tamper-evident audit trail of who did what, when
-- **Zero dependencies** - no Homebrew, no npm install; the installer sets up a pinned, hash-verified Node for you
+Every request is Ed25519-signed by a paired agent and checked against a strict allowlist and a filesystem jail. When you approve something, named files are frozen into a private copy and the run executes the copies - the approval works once, expires in 120 seconds, and everything lands in a tamper-evident log. Install downloads are version-pinned and SHA-256-verified. Details: [threat model](docs/threat-model.md).
 
 ## Limitations and roadmap
 
-- **macOS only, for now** - the jail, trash folder, and installer target macOS.
-- **Native MCP adapter not built yet** - AgentBridge already speaks MCP-style JSON-RPC (`initialize`, `tools/list`, `tools/call`) over signed HTTPS; a plug-and-play `mcp.json` adapter is on the roadmap.
-- **Free tunnel URLs rotate** - when a quick Cloudflare tunnel restarts it gets a fresh address; run `agent-bridge pair` again to hand the agent the new one.
+macOS only for now · native `mcp.json` adapter not built yet (MCP-style JSON-RPC already works) · free tunnel URLs rotate on restart - run `agent-bridge pair` again.
 
 ## Docs
 
