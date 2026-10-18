@@ -7,8 +7,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+const { withLock } = require('./lockfile');
 
 const APPROVAL_TTL_MS = 120 * 1000;
+const MAX_PENDING = 100;   // backlog cap: an agent cannot flood the human
+const TERMINAL_KEPT = 200; // forensic retention for decided records
 
 class Approvals {
   constructor(dir) {
@@ -18,32 +21,10 @@ class Approvals {
     this.lockPath = path.join(dir, '.lock');
   }
 
-  // Cross-process mutex via exclusive lockfile create. Server and CLI run in
-  // different processes; without this, two pollers could both consume the
-  // same approval.
-  _withLock(fn) {
-    const deadline = Date.now() + 5000;
-    for (;;) {
-      let fd;
-      try { fd = fs.openSync(this.lockPath, 'wx', 0o600); }
-      catch (e) {
-        if (e.code === 'EEXIST') {
-          // Break stale locks older than 30s.
-          try {
-            const st = fs.statSync(this.lockPath);
-            if (Date.now() - st.mtimeMs > 30000) { fs.unlinkSync(this.lockPath); continue; }
-          } catch {}
-          if (Date.now() > deadline) throw new Error('approval store locked');
-          const until = Date.now() + 25;
-          while (Date.now() < until) {} // brief spin; operations are tiny
-          continue;
-        }
-        throw e;
-      }
-      try { return fn(); }
-      finally { fs.closeSync(fd); try { fs.unlinkSync(this.lockPath); } catch {} }
-    }
-  }
+  // Cross-process mutex (shared lockfile helper, pid-liveness stale break).
+  // Server and CLI run in different processes; without this, two pollers
+  // could both consume the same approval.
+  _withLock(fn) { return withLock(this.lockPath, fn); }
 
   _read() { try { return JSON.parse(fs.readFileSync(this.path, 'utf8')); } catch { return []; } }
   _write(list) {
@@ -70,12 +51,22 @@ class Approvals {
       expires_at: Date.now() + APPROVAL_TTL_MS,
     };
     this._withLock(() => {
-      // Keep live pendings; also retain the most recent 200 decided records
-      // for forensics. Approved-but-unpolled approvals are never dropped.
       const all = this._read();
-      const live = all.filter(x => x.status === 'pending' && Date.now() < x.expires_at);
-      const decided = all.filter(x => !(x.status === 'pending' && Date.now() < x.expires_at)).slice(-200);
-      this._write([...decided, ...live, a]);
+      const now = Date.now();
+      const isLivePending = x => x.status === 'pending' && now < x.expires_at;
+      // NEVER drop an open record: live pendings, approved-but-unpolled, or
+      // in-flight executions survive no matter how many later decisions land.
+      // Only terminal records (denied, expired, consumed) are pruned, keeping
+      // the most recent TERMINAL_KEPT for forensics.
+      const isOpen = x => isLivePending(x) || x.status === 'approved' || x.status === 'executing';
+      const open = all.filter(isOpen);
+      if (open.filter(isLivePending).length >= MAX_PENDING) {
+        const err = new Error('too many pending approvals (' + MAX_PENDING + ') - the human must decide some first');
+        err.code = 'too_many_pending';
+        throw err;
+      }
+      const terminal = all.filter(x => !isOpen(x)).slice(-TERMINAL_KEPT);
+      this._write([...terminal, ...open, a]);
     });
     this._notifyDesktop(a);
     return { id: a.id, expires_at: a.expires_at };
@@ -86,6 +77,14 @@ class Approvals {
     // Text goes through osascript ARGV, never interpolated into the script,
     // so an agent-controlled summary cannot inject AppleScript.
     if (process.platform !== 'darwin') return;
+    // Coalesce: at most one desktop notification per minute. The pending
+    // list (`agent-bridge pending`) is the real review surface; a flood of
+    // notifications is an approval-fatigue attack on the human gate.
+    try {
+      const sentinel = path.join(this.dir, '.last-notify');
+      try { if (Date.now() - fs.statSync(sentinel).mtimeMs < 60000) return; } catch {}
+      fs.writeFileSync(sentinel, String(Date.now()), { mode: 0o600 });
+    } catch {}
     execFile('/usr/bin/osascript', [
       '-e', 'on run argv',
       '-e', 'display notification (item 1 of argv) with title (item 2 of argv)',

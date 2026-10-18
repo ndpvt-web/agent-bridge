@@ -104,7 +104,10 @@ console.log('\n=== Round 5: F4/fs#3 - cross-agent poll does not burn ===');
   const apid = d.rpc.result.structuredContent.approval_id;
   ap.decide(apid, 'approve');
   const steal = await b.call('approval.status', { approval_id: apid });
-  check('other agent gets forbidden', steal.rpc.result.structuredContent.status === 'forbidden');
+  // Round 6 hardened this further: other agents now learn nothing at all ('unknown'),
+  // not even that the id exists. Both 'unknown' (current) and 'forbidden' (round 5)
+  // mean the approval was NOT burned.
+  check('other agent gets unknown (not burned)', steal.rpc.result.structuredContent.status === 'unknown');
   const mine = await a.call('approval.status', { approval_id: apid });
   check('owner still executes afterwards', mine.rpc.result.structuredContent.status === 'executed', JSON.stringify(mine.rpc.result).slice(0, 150));
   check('trash manifest recorded', fs.readFileSync(path.join(tmp, 'trash', 'manifest.jsonl'), 'utf8').includes('data.txt'));

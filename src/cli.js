@@ -18,7 +18,7 @@ const audit = new AuditLog(path.join(installDir, 'logs', 'audit.jsonl'), keystor
 // Programs that are shells in disguise: granting them to an agent grants
 // full code execution for that agent. We allow it - the human owns the Mac -
 // but never silently.
-const DANGEROUS_PROGRAMS = new Set(['node','python3','python','ruby','perl','php','zsh','bash','sh','npm','npx','yarn','make','xcodebuild','swift','swiftc','xcrun','git','curl','wget','osascript','defaults','launchctl','crontab','tar','zip','find','sed','awk','ssh','scp','rsync','docker','brew']);
+const DANGEROUS_PROGRAMS = new Set(['node','python3','python','ruby','perl','php','zsh','bash','sh','npm','npx','yarn','make','xcodebuild','swift','swiftc','xcrun','git','curl','wget','osascript','defaults','launchctl','crontab','tar','zip','find','sed','awk','ssh','scp','rsync','docker','brew','vim','vi','nvim','view','less','more','man','nano','emacs','ed','ex','sqlite3','script','env','ftp','telnet','lldb','gdb','screen','tmux','expect']);
 
 // Print a value exactly as stored - no control characters reach the terminal,
 // no padding tricks, no forged lines.
@@ -80,7 +80,7 @@ switch (cmd) {
     const agents = keystore.listAgents();
     if (!agents.length) { console.log('No paired agents.'); break; }
     for (const a of agents) {
-      console.log(`${a.revoked ? '[REVOKED] ' : ''}${a.id}  ${a.name}  profile=${a.profile}  paired=${a.created_at}${a.last_seen_at ? '  last_seen=' + a.last_seen_at : ''}`);
+      console.log(`${a.revoked ? '[REVOKED] ' : ''}${a.id}  ${JSON.stringify(a.name)}  profile=${a.profile}  paired=${a.created_at}${a.last_seen_at ? '  last_seen=' + a.last_seen_at : ''}`);
     }
     break;
   }
@@ -144,7 +144,7 @@ switch (cmd) {
       console.log(lines.length + ' audit entries. Last 10:');
       for (const l of lines.slice(-10)) {
         const e = JSON.parse(l);
-        console.log(`  #${e.seq} ${e.ts} ${e.agent || '-'} ${e.tool} ${e.decision}${e.detail ? ' — ' + e.detail : ''}`);
+        console.log(`  #${e.seq} ${e.ts} ${e.agent || '-'} ${e.tool} ${e.decision}${e.detail ? ' - ' + JSON.stringify(e.detail) : ''}`);
       }
     } catch { console.log('No audit log yet.'); }
     break;

@@ -27,28 +27,32 @@ NODE_VERSION="22.20.0"
 NODE_SHA256_ARM64="cc04a76a09f79290194c0646f48fec40354d88969bec467789a5d55dd097f949"
 NODE_SHA256_X64="00df9c5df3e4ec6848c26b70fb47bf96492f342f4bed6b17f12d99b3a45eeecc"
 CLOUDFLARED_VERSION="2025.9.1"
-CF_SHA256_ARM64="0c20739ccab70c804e97b824a048e2028869c01e8c795b0033dd66b61962d491"
-CF_SHA256_AMD64="3d205852967f91823798dd909cc8e0a10c07db7ab0a9f0a7b5fd21a0e7766e82"
+CF_SHA256_ARM64="106e375d6e0f8ee77eab9ba5abc8aef93962c066bd0bf240ab8a8b21a1b58c9f"
+CF_SHA256_AMD64="a678196af2e0f870a9ab95b5696af38f74586c2db642884e14ea29adc424bec5"
 
-# --- Input validation (values are interpolated into config + plists) ---
-case "$PROFILE" in readonly|workspace|developer) ;; *) fail "Unknown --profile '$PROFILE' (want readonly|workspace|developer)";; esac
-case "$BRIDGE_PORT" in ''|*[!0-9]*) fail "AGENT_BRIDGE_PORT must be numeric";; esac
-[[ "$BRIDGE_PORT" -ge 1024 && "$BRIDGE_PORT" -le 65535 ]] || fail "AGENT_BRIDGE_PORT out of range"
-case "$HOME" in *[\&\<\>]*) fail "HOME contains characters unsafe for plist XML";; esac
+info() { printf '\033[0;34m[*]\033[0m %s\n' "$1"; }
+ok()   { printf '\033[0;32m[+]\033[0m %s\n' "$1"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$1"; }
+fail() { printf '\033[0;31m[x]\033[0m %s\n' "$1"; exit 1; }
 
+# --- Parse arguments FIRST... ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --profile) PROFILE="$2"; shift 2 ;;
+    --profile) PROFILE="${2:-}"; shift 2 ;;
     --profile=*) PROFILE="${1#*=}"; shift ;;
     --enable-shell) ENABLE_SHELL=1; shift ;;
     *) shift ;;
   esac
 done
 
-info() { printf '\033[0;34m[*]\033[0m %s\n' "$1"; }
-ok()   { printf '\033[0;32m[+]\033[0m %s\n' "$1"; }
-warn() { printf '\033[1;33m[!]\033[0m %s\n' "$1"; }
-fail() { printf '\033[0;31m[x]\033[0m %s\n' "$1"; exit 1; }
+# --- ...THEN validate, strictly. These values are interpolated into
+# config.json and the launchd plists, so they must be whitelisted known-safe
+# values, never arbitrary text (a crafted --profile must not inject JSON
+# keys into config.json).
+case "$PROFILE" in readonly|workspace|developer) ;; *) fail "Unknown --profile '$PROFILE' (want readonly|workspace|developer)";; esac
+case "$BRIDGE_PORT" in ''|*[!0-9]*) fail "AGENT_BRIDGE_PORT must be numeric";; esac
+[[ "$BRIDGE_PORT" -ge 1024 && "$BRIDGE_PORT" -le 65535 ]] || fail "AGENT_BRIDGE_PORT out of range"
+case "$HOME" in *[\&\<\>]*) fail "HOME contains characters unsafe for plist XML";; esac
 
 [[ "$(uname)" == "Darwin" ]] || fail "macOS only. Detected: $(uname)"
 
@@ -71,7 +75,7 @@ install_node() {
     major=$(node --version | sed 's/v//' | cut -d. -f1)
     if [[ "$major" -ge 18 ]]; then
       NODE_BIN=$(command -v node)
-      warn "Using system Node $(node --version) (NOT pinned/verified). Remove it from PATH to force the pinned download."
+      warn "Using system Node $(node --version) - NOT hash-verified (pinned download skipped). Remove it from PATH to force the verified download."
       return
     fi
   fi
@@ -101,7 +105,7 @@ install_cloudflared() {
   if [[ -x "$BIN_DIR/cloudflared" ]]; then CF_BIN="$BIN_DIR/cloudflared"; ok "cloudflared (previously installed, pinned)"; return; fi
   if command -v cloudflared &>/dev/null; then
     CF_BIN=$(command -v cloudflared)
-    warn "Using system cloudflared (NOT pinned/verified). Remove it from PATH to force the pinned download."
+    warn "Using system cloudflared - NOT hash-verified (pinned download skipped). Remove it from PATH to force the verified download."
     return
   fi
   local expected

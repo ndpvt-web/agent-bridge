@@ -32,7 +32,7 @@ export class BridgeClient {
   async pair(code, name = 'test-agent', publicKeyOverride) {
     const res = await fetch(this.baseUrl + '/pair', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Connection': 'close' },
+      headers: { 'Content-Type': 'application/json', 'Connection': 'close', 'X-Bridge-Request': '1' },
       body: JSON.stringify({ pairing_code: code, agent_name: name, public_key: publicKeyOverride ?? this.keys.publicKeyB64Url }),
     });
     const data = await res.json();

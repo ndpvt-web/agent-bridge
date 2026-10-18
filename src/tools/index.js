@@ -26,11 +26,17 @@ function grammarAllows(argv, grammar, cwd, workspaceRoot) {
   const flags = new Set(grammar.flags || []);
   const valueFlags = grammar.valueFlags || {};
   const longFlags = new Set(grammar.longFlags || []);
+  const patternFlags = new Set(grammar.patternFlags || []);
   const maxArgs = grammar.maxArgs === undefined ? 16 : grammar.maxArgs;
   if (argv.length - 1 > maxArgs) return false;
-  let positionalSeen = 0;
   let endOfFlags = false;
+  let patternSeen = false;
+  const positionals = [];
   let i = 1;
+  // PASS 1: parse flags, collect positionals. Whether the pattern came from
+  // a flag (grep -e) decides what the positionals ARE, so classification
+  // happens in pass 2 with the full picture - a pattern flag appearing
+  // after a positional still turns that positional into a file operand.
   while (i < argv.length) {
     const tok = argv[i];
     if (!endOfFlags && tok === '--') { endOfFlags = true; i++; continue; }
@@ -39,6 +45,7 @@ function grammarAllows(argv, grammar, cwd, workspaceRoot) {
       const eq = tok.indexOf('=');
       if (eq !== -1) return false; // joined long values are never auto-allowed
       if (longFlags.has(tok)) { i++; continue; }
+      if (patternFlags.has(tok)) patternSeen = true;
       const vt = valueFlags[tok];
       if (vt === 'pair') {
         const name = argv[i + 1], val = argv[i + 2];
@@ -58,6 +65,7 @@ function grammarAllows(argv, grammar, cwd, workspaceRoot) {
       let j = 0;
       while (j < chars.length) {
         const f = '-' + chars[j];
+        if (patternFlags.has(f)) patternSeen = true;
         if (flags.has(f)) { j++; continue; }
         const vt = valueFlags[f];
         if (vt) {
@@ -75,20 +83,42 @@ function grammarAllows(argv, grammar, cwd, workspaceRoot) {
       }
       i++; continue;
     }
-    // positional argument
-    positionalSeen++;
+    positionals.push(tok);
+    i++;
+  }
+  // PASS 2: classify positionals. patternSeen means the pattern was given
+  // by flag, so EVERY positional is a file operand and must be jailed.
+  for (let idx = 0; idx < positionals.length; idx++) {
     let kind;
-    if (positionalSeen === 1 && grammar.firstPositional === 'any') kind = 'any';
+    if (patternSeen) kind = 'jailed';
+    else if (idx === 0 && grammar.firstPositional === 'any') kind = 'any';
     else if (grammar.pathArgs === 'any') kind = 'any';
     else if (grammar.pathArgs === 'none') kind = 'none';
     else kind = 'jailed';
     if (kind === 'none') return false;
     if (kind === 'jailed') {
-      try { resolveInRoots(tok, [workspaceRoot], cwd); } catch { return false; }
+      try { resolveInRoots(positionals[idx], [workspaceRoot], cwd); } catch { return false; }
     }
-    i++;
   }
   return true;
+}
+
+// Move a file to trash. rename(2) is atomic but fails with EXDEV across
+// filesystems (workspace and install dir on different volumes) - fall back
+// to a race-checked stream copy + unlink instead of dying opaquely.
+function moveToTrash(real, dest) {
+  try { fs.renameSync(real, dest); return; }
+  catch (e) { if (e.code !== 'EXDEV') throw e; }
+  const srcFd = safeOpen(real, fs.constants.O_RDONLY);
+  try {
+    const dstFd = safeOpen(dest, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      let n;
+      while ((n = fs.readSync(srcFd, buf, 0, buf.length, null)) > 0) fs.writeSync(dstFd, buf, 0, n);
+    } finally { fs.closeSync(dstFd); }
+  } finally { fs.closeSync(srcFd); }
+  fs.unlinkSync(real);
 }
 
 class ToolError extends Error {
@@ -128,9 +158,14 @@ function optInt(v, name, min, max, dflt) {
 
 // --- pending-approval result wrapper ---
 function pendingResult(ctx, kind, toolName, summary, payload) {
-  const { id, expires_at } = ctx.approvals.create({
-    kind, agentId: ctx.agent.id, summary, payload, toolName,
-  });
+  let created;
+  try {
+    created = ctx.approvals.create({ kind, agentId: ctx.agent.id, summary, payload, toolName });
+  } catch (e) {
+    if (e && e.code === 'too_many_pending') throw new ToolError('busy', e.message);
+    throw e;
+  }
+  const { id, expires_at } = created;
   ctx.audit.record({ agent: ctx.agent.id, tool: kind + ':request', decision: 'approval_requested', detail: summary });
   return {
     status: 'pending_approval',
@@ -174,6 +209,7 @@ tools['fs.list'] = {
     const p = needStr(args.path, 'path');
     const { real } = resolveInRoots(p, ctx.readRoots, ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root });
     const entries = fs.readdirSync(real, { withFileTypes: true }).slice(0, MAX_LIST_ENTRIES);
+    ctx.audit.record({ agent: ctx.agent.id, tool: 'fs.list', decision: 'executed', detail: real });
     return {
       path: real,
       items: entries.map(e => {
@@ -206,7 +242,8 @@ tools['fs.read'] = {
     requireCap(ctx.agent, 'fs_read');
     const p = needStr(args.path, 'path');
     const { real } = resolveInRoots(p, ctx.readRoots, ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root });
-    assertRegularFileOrDir(real);
+    const st0 = assertRegularFileOrDir(real);
+    if (st0.isDirectory()) throw new ToolError('is_directory', 'path is a directory - use fs.list');
     const maxBytes = Math.min(optInt(args.max_bytes, 'max_bytes', 1, ctx.cfg.max_read_bytes, ctx.cfg.max_read_bytes), ctx.cfg.max_read_bytes);
     const st = fs.statSync(real);
     const fd = safeOpen(real, fs.constants.O_RDONLY);
@@ -216,6 +253,8 @@ tools['fs.read'] = {
       let off = 0;
       while (off < size) { off += fs.readSync(fd, buf, off, size - off, off); }
       const truncated = st.size > maxBytes;
+      // Read access is the sensitive unapproved op: the path is on the record.
+      ctx.audit.record({ agent: ctx.agent.id, tool: 'fs.read', decision: 'executed', detail: real + (truncated ? ' (truncated)' : '') });
       return {
         path: real, size: st.size, returned_bytes: size, truncated,
         modified: st.mtime.toISOString(),
@@ -225,7 +264,6 @@ tools['fs.read'] = {
   },
 };
 
-// fs.read records the path for forensics (read access is the sensitive op).
 tools['fs.write'] = {
   description: 'Write a file inside the workspace root. Previous content is versioned. base64 content.',
   schema: {
@@ -332,7 +370,7 @@ tools['fs.delete'] = {
     const st = assertRegularFileOrDir(real);
     if (st.isDirectory()) throw new ToolError('is_directory', 'fs.delete removes files only, not directories');
     if (st.nlink > 1) throw new JailError('hardlinked file - refusing to delete');
-    return { summary: 'delete file: ' + real, payload: { real } };
+    return { summary: 'delete file: ' + real, payload: { real, dev: st.dev, ino: st.ino, size: st.size, mtime_ms: st.mtimeMs } };
   },
   execute(ctx, payload) {
     // Re-validate at execution time: the world may have changed since approval.
@@ -341,10 +379,17 @@ tools['fs.delete'] = {
     const st = assertRegularFileOrDir(real);
     if (st.isDirectory()) throw new JailError('target became a directory since approval - refusing');
     if (st.nlink > 1) throw new JailError('hardlinked file - refusing to delete');
+    // The human approved deleting THIS file, not whatever now sits at the
+    // path. Bind to inode + size + mtime (inode alone can be recycled after
+    // an unlink+recreate); a replaced file needs a fresh approval.
+    if (payload.dev !== undefined &&
+        (st.dev !== payload.dev || st.ino !== payload.ino || st.size !== payload.size || st.mtimeMs !== payload.mtime_ms)) {
+      throw new JailError('file changed since approval - refusing; request a fresh approval');
+    }
     const trashDir = path.join(ctx.cfg.install_dir, 'trash');
     fs.mkdirSync(trashDir, { recursive: true, mode: 0o700 });
     const dest = path.join(trashDir, Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '-' + path.basename(real));
-    fs.renameSync(real, dest);
+    moveToTrash(real, dest);
     fs.appendFileSync(path.join(trashDir, 'manifest.jsonl'),
       JSON.stringify({ ts: new Date().toISOString(), original: real, trashed_as: dest, agent: ctx.agent.id }) + '\n', { mode: 0o600 });
     ctx.audit.record({ agent: ctx.agent.id, tool: 'fs.delete', decision: 'executed', detail: real + ' -> ' + dest });
@@ -394,16 +439,51 @@ tools['process.run'] = {
     const needsApproval = !autoAllowed;
     // Summary must let the human see EXACTLY what runs: argv as a JSON array,
     // never an ambiguous space-joined string.
+    // Bind the approval to file CONTENT, not just argv strings: any argv
+    // element that is a regular file inside the workspace is hashed now and
+    // re-hashed at execute time. Otherwise an agent could get "node run.js"
+    // approved and then rewrite run.js before polling.
+    const fileHashes = {};
+    for (let k = 1; k < argv.length; k++) {
+      const a = argv[k];
+      if (a.startsWith('-') || a.length > 1024) continue;
+      try {
+        const { real } = resolveInRoots(a, [ctx.cfg.workspace_root], cwd);
+        const st = fs.lstatSync(real);
+        if (st.isFile() && !st.isSymbolicLink() && st.size <= 64 * 1024 * 1024) {
+          fileHashes[real] = crypto.createHash('sha256').update(fs.readFileSync(real)).digest('hex');
+        }
+      } catch { /* not an in-jail file: nothing to bind */ }
+    }
     const summary = 'run argv=' + JSON.stringify(argv) + (args.cwd ? ' cwd=' + cwd : '');
-    return { summary, payload: { argv, cwd, timeout, bin }, needsApproval };
+    return { summary, payload: { argv, cwd, timeout, bin, file_hashes: fileHashes }, needsApproval };
   },
   execute(ctx, payload) {
     // Re-validate cwd at execution time: it may have been swapped for a
     // symlink between approval and execution.
     const cwd = resolveInRoots(payload.cwd, [ctx.cfg.workspace_root], ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root }).real;
+    // Content binding from plan(): refuse to run if an approved input file
+    // was rewritten after the human said yes.
+    if (payload.file_hashes) {
+      for (const [p, h] of Object.entries(payload.file_hashes)) {
+        let cur;
+        try { cur = crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'); }
+        catch { throw new ToolError('changed', 'approved input file vanished: ' + p); }
+        if (cur !== h) throw new ToolError('changed', 'file changed after approval: ' + p + ' - request a fresh approval');
+      }
+    }
+    // Per-program environment isolation (e.g. jq reads ~/.jq and exposes
+    // env to filters): give such programs an empty HOME.
+    let env = scrubbedEnv();
+    const grammar = PROGRAM_GRAMMARS[payload.bin];
+    if (grammar && grammar.isolateHome) {
+      const fakeHome = path.join(ctx.cfg.install_dir, 'empty-home');
+      try { fs.mkdirSync(fakeHome, { recursive: true, mode: 0o700 }); } catch {}
+      env = { ...env, HOME: fakeHome };
+    }
     return new Promise((resolve) => {
       const child = spawn(payload.argv[0], payload.argv.slice(1), {
-        cwd, env: scrubbedEnv(), shell: false,
+        cwd, env, shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let out = Buffer.alloc(0), err = Buffer.alloc(0), timedOut = false;
@@ -438,6 +518,7 @@ tools['shell.exec'] = {
   },
   approval: 'shell',
   plan(ctx, args) {
+    requireCap(ctx.agent, 'shell'); // profiles gate what agents may even request
     if (!ctx.cfg.enable_shell) {
       throw new ToolError('disabled', 'shell.exec is disabled on this bridge (install with --enable-shell to allow, still approval-gated)');
     }
@@ -465,6 +546,9 @@ tools['approval.status'] = {
   async run(ctx, args) {
     const id = needStr(args.approval_id, 'approval_id', 64);
     const { state, approval } = ctx.approvals.status(id);
+    // Approvals are private to their owner: another agent learns nothing,
+    // not even whether the id exists.
+    if (approval && approval.agent_id && approval.agent_id !== ctx.agent.id) return { status: 'unknown' };
     if (state === 'unknown' || state === 'expired' || state === 'pending' || state === 'denied') {
       return { status: state };
     }

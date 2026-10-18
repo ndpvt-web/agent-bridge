@@ -1,140 +1,74 @@
-# AgentBridge — Connect Your Mac to Any Cloud AI Agent in One Command
+# AgentBridge — Let any AI agent work on your Mac, safely
 
-**AgentBridge turns your Mac into a secure, remote-controlled workstation for any cloud AI agent** — Claude, ChatGPT, Cursor, Instinct, HappyCapy, or your own agent — with one terminal command. Run builds on your Mac's Xcode, read and write local files, and let your agent work on your machine 24/7, without giving away the keys to your Mac.
+**One terminal command connects your Mac to any cloud AI agent. The agent can build, read files, and run commands on your Mac — and every risky action needs your approval first.**
 
-- **Zero dependencies** — pure Node.js built-ins, no `npm install`, no Homebrew required
-- **Secure by design** — Ed25519-signed requests, capability-based tools, filesystem jail, on-device human approvals, tamper-evident audit log
-- **Agent-agnostic** — speaks MCP-style JSON-RPC (`initialize`, `tools/list`, `tools/call`). If your agent can call tools, it can use AgentBridge
-- **One command** — installs Node and cloudflared (version-pinned, SHA-256 verified against hashes embedded in the installer, fail-closed), the bridge, and 24/7 auto-start via launchd
+[Quickstart](#install-in-one-command) · [How it stays safe](#how-it-stays-safe) · [SECURITY.md](SECURITY.md) · [Issues](https://github.com/ndpvt-web/agent-bridge/issues)
 
-```
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+
+> [!NOTE]
+> **Status (Oct 2026):** Two full rounds of independent security review are done — every finding fixed at the root, with 223 adversarial test cases, 10 end-to-end tests, and 21 installer end-to-end checks passing. Treat this as release-candidate software.
+
+## What it is
+
+Your Mac, remote-controlled by an AI agent — without handing over the keys.
+
+AgentBridge runs a small, secure server on your Mac. Point your cloud agent (Claude, ChatGPT, Cursor, Instinct, HappyCapy, or your own) at it, and the agent can do real work on your machine: run Xcode builds, read and write files, execute commands — all inside strict limits you control.
+
+- **One command to install** — no Homebrew, no npm install, zero dependencies beyond Node (which the installer sets up for you)
+- **You approve the risky stuff** — commands outside a strict allowlist and all deletions wait for your yes on the Mac itself, bound to the exact action you approved
+- **Files stay in a jail** — the agent only sees the folder you choose, never your whole disk. Writes are versioned and deletes go to a trash folder, so mistakes are recoverable
+- **Every action is logged** — a tamper-evident audit trail of who did what, when
+- **Works with any agent** — speaks MCP-style JSON-RPC (`initialize`, `tools/list`, `tools/call`). If your agent can call tools, it can use AgentBridge
+
+## Install in one command
+
+```bash
 curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
+```
+
+Then pair your agent:
+
+```bash
 agent-bridge pair
 ```
 
-(Or clone the repo and build the installer locally: `bash scripts/build-installer.sh`.)
+This prints a tunnel URL and a one-time pairing code (valid 10 minutes). Paste both into your cloud agent. Done — the bridge now runs 24/7 in the background via launchd.
 
-Paste the one-time pairing code and tunnel URL into your cloud agent. Done.
+Prefer to build from source? `bash scripts/build-installer.sh` builds the installer locally.
 
----
+## What your agent can do
 
-> **Status — October 2026:** AgentBridge has passed one full round of independent security review (all findings fixed at the root, 169 adversarial test cases + 10 end-to-end tests green). A second, independent review round is currently running; any findings will be fixed in follow-up commits here. Treat this as release-candidate software.
+- Read, write, and list files inside your chosen folder
+- Run approved commands — builds, tests, and a curated set of safe dev tools without asking
+- Work while you're away — the bridge stays up, you stay in control
+- Get its own identity — each agent pairs with its own Ed25519 key, so you can see and revoke each one separately
 
-## Why not just expose a shell over a tunnel?
+## How it stays safe
 
-Because that is how you lose a Mac. The common pattern — a local HTTP server with a bearer token and a `/exec` endpoint — collapses the moment a token leaks into a log, a screenshot, or a chat message. And even with a perfect token, the *agent itself* can be prompt-injected into running something destructive.
+1. **Signed requests** — every call is Ed25519-signed by a paired agent key. No key, no access. Captured requests can't be replayed.
+2. **Strict command allowlist** — per-program argument rules, not patterns an agent can talk its way around.
+3. **Filesystem jail** — realpath-checked; symlink escapes and writes through links are refused.
+4. **Human approval gate** — anything outside the allowlist pings your Mac for a yes/no, and what runs is exactly what you approved, down to the file contents.
+5. **Tamper-evident audit log** — hash-chained; edits to history show up as tampering.
 
-AgentBridge is built on a different set of assumptions:
+The installer's downloads are version-pinned and SHA-256-verified against hashes embedded in the script, fail-closed on mismatch. Full details in [SECURITY.md](SECURITY.md) and the [threat model](docs/threat-model.md).
 
-| Assumption | Consequence |
-|---|---|
-| The tunnel URL is public knowledge | Authentication must survive a public endpoint |
-| Any single credential can leak | No bearer tokens; per-request Ed25519 signatures; only public keys stored |
-| The agent can be manipulated | Capabilities, not a shell; human approval for anything irreversible |
-| The laptop is on hostile networks | Loopback-only bind, no CORS, Host-header checks |
-| You will want to know what happened | Hash-chained, HMAC-authenticated audit log of every decision |
+## Day-to-day
 
-## Architecture
-
-```
-┌──────────────┐   HTTPS (Cloudflare Tunnel)   ┌─────────────────────────────┐
-│  Cloud agent │ ────────────────────────────▶ │  cloudflared (quick tunnel) │
-│ (Claude,     │   Ed25519-signed requests     │         │                   │
-│  Instinct, …)│                               │         ▼                   │
-└──────────────┘                               │  AgentBridge (127.0.0.1)    │
-                                               │   ├─ pairing (one-time code)│
-                                               │   ├─ signature + replay chk │
-                                               │   ├─ capability tools       │
-                                               │   ├─ fs jail (workspace)    │
-                                               │   ├─ approval gate ──▶ YOU  │
-                                               │   └─ audit log (chained)    │
-                                               └─────────────────────────────┘
-```
-
-**The Mac never listens on the network.** The server binds `127.0.0.1` only; cloudflared dials out. There is no inbound port, no LAN exposure, no router config.
-
-## The security model in five rules
-
-1. **No bearer tokens.** Agents pair with a one-time code (10-minute TTL, single-use) and register an Ed25519 public key. The bridge stores *only public keys* — a full read of its secrets directory yields nothing that can authenticate. Every request is signed over `(agent, timestamp, nonce, method, path, body-hash)` with a 120-second window and a nonce replay cache.
-
-2. **Capabilities, not a shell.** The API is a small tool catalog: `system.info`, `fs.list`, `fs.read`, `fs.write`, `fs.delete`, `process.run`, `approval.status`. Raw `shell.exec` exists only if you opt in at install time (`--enable-shell`) — and *every* call still requires your on-device approval.
-
-3. **The allowlist is honest.** Auto-approved programs are inspection-only (`ls`, `cat`, `grep`, `jq`, …) and each is held to an exact argument grammar: deny-by-default flags, no joined `--opt=value` forms, and every path argument must stay inside the workspace. Interpreters and build tools (`node`, `python3`, `git`, `make`, `xcodebuild`, `npm`) are shells in disguise, so they always require approval — or a per-agent grant *you* set from the Mac: `agent-bridge allow <agent> xcodebuild` (with a loud warning when the program can execute code). The API can never expand its own permissions.
-
-4. **The filesystem is jailed.** The agent sees its workspace and nothing else by default — not your home directory, not the bridge's own keys (those are denied even if you add your home as a read root). Writes and deletes stay inside `~/agent-bridge/workspace`: symlinks resolved before the check, writes are atomic (temp + rename) through race-checked opens, hardlinks refused. Deletes move to a local trash with a restore manifest; overwrites keep 20 versions.
-
-5. **You are the root of trust.** Destructive or elevated actions create a pending approval; `agent-bridge approve <id>` shows you the exact action — full argv as a JSON array, control characters escaped, nothing truncated or padded away — and asks you to confirm. Default deny, 120 seconds to decide, 10 minutes to execute after your yes, single-use, race-safe.
-
-See [docs/threat-model.md](docs/threat-model.md) for the full analysis and [SECURITY.md](SECURITY.md) for reporting.
-
-## The one-time setup
-
-```bash
-# 1. Install (macOS, Apple Silicon or Intel)
-curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
-
-# 2. Pair an agent (prints a one-time code, valid 10 minutes)
-agent-bridge pair                    # default: workspace profile
-agent-bridge pair --profile readonly    # read-only agent
-agent-bridge pair --profile developer   # + process execution (approval-gated)
-
-# 3. Give your cloud agent: the tunnel URL + the pairing code.
-#    It registers its public key and starts making signed calls.
-```
-
-## Profiles
-
-| Profile | fs.read / fs.list | fs.write / fs.delete | process.run | shell.exec |
-|---|---|---|---|---|
-| `readonly` | ✅ | — | — | — |
-| `workspace` (default) | ✅ | ✅ (workspace, approval for delete) | — | — |
-| `developer` | ✅ | ✅ | allowlist or approval | opt-in + always approval |
-
-## Day-to-day commands
-
-```bash
-agent-bridge status            # config summary, no secrets
-agent-bridge pair              # new pairing code
-agent-bridge agents            # who is connected
-agent-bridge revoke <agent>    # cut an agent off instantly
-agent-bridge pending           # what is waiting on you
-agent-bridge approve <id>      # allow one pending action
-agent-bridge allow <agent> git # trust this agent with one program
-agent-bridge audit --verify    # prove the audit log is intact
-~/agent-bridge/uninstall.sh    # remove everything
-```
+| Command | What it does |
+| --- | --- |
+| `agent-bridge pair` | Pair a new agent (prints one-time code) |
+| `agent-bridge status` | Is the bridge running, and who's connected |
+| `agent-bridge revoke <agent>` | Cut off an agent |
+| `agent-bridge audit` | Review the audit log |
+| `agent-bridge uninstall` | Remove the bridge (keeps your workspace unless `--purge`) |
 
 ## For agent developers
 
-AgentBridge exposes MCP-style JSON-RPC over a single `POST /mcp` endpoint:
-
-```json
-{ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-  "params": { "name": "fs.read", "arguments": { "path": "notes/todo.md" } } }
-```
-
-Headers: `X-Bridge-Agent`, `X-Bridge-Ts`, `X-Bridge-Nonce`, `X-Bridge-Sign` (Ed25519 over the canonical string), `X-Bridge-Request: 1`, `Content-Type: application/json`. Full spec: [docs/protocol.md](docs/protocol.md). A reference client lives in [test/client.mjs](test/client.mjs).
-
-## What this is not
-
-- Not a sandbox against software already running as you on your Mac.
-- Not a replacement for locking your screen — approvals are CLI-based.
-- Not affiliated with Cloudflare; quick tunnels are used for transport only. For production use, switch to a named tunnel with Cloudflare Access for an additional identity layer.
-
-## FAQ
-
-**Does this work with Claude Code / Cursor / Instinct / my own agent?**
-Yes — anything that can make HTTPS POSTs. The protocol is ~100 lines to implement; see docs/protocol.md.
-
-**What happens if my tunnel URL leaks?**
-Nothing, by itself. Requests still need a paired agent's private key, fresh timestamps, and unused nonces.
-
-**What happens if the agent goes rogue?**
-By default it can only see and write its workspace — not your home directory. Deletes need your approval, interpreters and build tools need your approval, and raw shell is off unless you opted in. `agent-bridge revoke` cuts it off instantly, and `agent-bridge audit` shows you every decision it was part of.
-
-**Linux support?**
-The server is platform-neutral and is developed/tested on Linux; the installer, launchd integration, and desktop notifications are macOS-only today. Linux installers (systemd) are on the roadmap.
+AgentBridge speaks MCP-style JSON-RPC over the tunnel. Call `initialize`, list tools with `tools/list`, and invoke them with `tools/call`. See the [docs](docs) for the tool catalogue and pairing handshake.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT

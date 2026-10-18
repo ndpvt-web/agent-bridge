@@ -11,9 +11,9 @@ const path = require('path');
 // Shell access is NEVER part of a profile. It is a separate install-time
 // opt-in (enable_shell) and every call still needs on-device approval.
 const PROFILES = {
-  readonly:  { fs_read: true,  fs_write: false, fs_delete: false, process_run: false },
-  workspace: { fs_read: true,  fs_write: true,  fs_delete: true,  process_run: false },
-  developer: { fs_read: true,  fs_write: true,  fs_delete: true,  process_run: true },
+  readonly:  { fs_read: true,  fs_write: false, fs_delete: false, process_run: false, shell: false },
+  workspace: { fs_read: true,  fs_write: true,  fs_delete: true,  process_run: false, shell: false },
+  developer: { fs_read: true,  fs_write: true,  fs_delete: true,  process_run: true,  shell: true },
 };
 
 // Programs a developer-profile agent may run without per-call approval, and
@@ -29,6 +29,10 @@ const PROFILES = {
 //   longFlags:    exact '--name' tokens allowed (no '=' joined forms ever)
 //   plusArgs:     tokens starting with '+' (e.g. date formats), any content
 //   firstPositional: 'any' allows the first positional to be a pattern/filter
+//   patternFlags: flags that SUPPLY the pattern (e.g. grep -e). When any is
+//                 present, every positional is a file operand and is jailed.
+//   isolateHome:  spawn with HOME pointed at an empty dir (jq reads ~/.jq
+//                 and exposes env to filters)
 // Positional args after that must resolve inside the workspace jail.
 //
 // NOT HERE: interpreters, shells, build tools, package managers, anything
@@ -42,7 +46,10 @@ const PROGRAM_GRAMMARS = {
   tail:  { flags: ['-q', '-v'], valueFlags: { '-n': 'int', '-c': 'int' }, longFlags: ['--help', '--version'] },
   wc:    { flags: '-l -w -c -m -L'.split(' '), longFlags: ['--help', '--version'] },
   file:  { flags: ['-b', '-i', '-z', '-L'], longFlags: ['--help', '--version'] },
-  stat:  { flags: ['-l', '-x', '-L', '-r', '-s', '-q'], valueFlags: { '-f': 'text', '-t': 'text' }, longFlags: ['--help', '--version'] },
+  stat:  process.platform === 'darwin'
+           ? { flags: ['-l', '-x', '-L', '-r', '-s', '-q'], valueFlags: { '-f': 'text', '-t': 'text' }, longFlags: ['--help', '--version'] }
+           // GNU coreutils: -t/-f take NO value; -c takes the format string.
+           : { flags: ['-L', '-t', '-f'], valueFlags: { '-c': 'text' }, longFlags: ['--help', '--version'] },
   which: { flags: ['-a', '-s'], pathArgs: 'any', longFlags: ['--help'] },
   uname: { flags: '-a -m -n -p -r -s -v'.split(' '), longFlags: ['--help'], maxArgs: 0 },
   sw_vers: { flags: [], longFlags: [], maxArgs: 0 },
@@ -51,21 +58,33 @@ const PROGRAM_GRAMMARS = {
   date:  { flags: ['-u', '-R', '-r', '-n', '-j'], plusArgs: true, pathArgs: 'none', longFlags: ['--help'], maxArgs: 1 },
   echo:  { flags: ['-n', '-e', '-E'], pathArgs: 'any', longFlags: ['--help', '--version'] },
   printf: { flags: [], pathArgs: 'any', longFlags: ['--help'] },
-  grep:  { flags: ['-i','-v','-n','-c','-l','-L','-w','-x','-E','-F','-o','-r','-R','-h','-H','-q','-s','-z'],
+  // -R is NOT here: it follows symlinks during traversal, out of the jail.
+  // -r recurses without following links. -e supplies the pattern by flag,
+  // which makes every positional a jailed file operand (patternFlags).
+  grep:  { flags: ['-i','-v','-n','-c','-l','-L','-w','-x','-E','-F','-o','-r','-h','-H','-q','-s','-z'],
            valueFlags: { '-m': 'int', '-A': 'int', '-B': 'int', '-C': 'int', '-e': 'text' },
+           patternFlags: ['-e'],
            longFlags: ['--help', '--version'], firstPositional: 'any' },
   rg:    { flags: '-i -v -n -c -l -w -x -S -F -o -h -H -q -s -u -N -M -j -0'.split(' '),
            valueFlags: { '-m': 'int', '-A': 'int', '-B': 'int', '-C': 'int', '-e': 'text', '-t': 'text', '-T': 'text', '-g': 'text' },
+           patternFlags: ['-e'],
            longFlags: ['--help', '--version'], firstPositional: 'any' },
   sort:  { flags: '-n -r -u -f -R -c -m -b -d -i -h -g -z -s -V -M'.split(' '), longFlags: ['--help', '--version'] },
   uniq:  { flags: ['-c', '-d', '-u', '-i', '-z', '-D'], valueFlags: { '-f': 'int', '-s': 'int', '-w': 'int' }, longFlags: ['--help', '--version'] },
-  diff:  { flags: '-u -c -q -r -i -w -b -y -p -a -e -n -s -l -t -E -B -Z -d'.split(' '),
+  // -r is NOT here: recursive diff follows symlinks during traversal, out
+  // of the jail. Recursive diff needs approval.
+  diff:  { flags: '-u -c -q -i -w -b -y -p -a -e -n -s -l -t -E -B -Z -d'.split(' '),
            valueFlags: { '-U': 'int', '-C': 'int', '-L': 'text' }, longFlags: ['--help', '--version', '--brief', '--report-identical-files'] },
   jq:    { flags: ['-r','-c','-n','-e','-s','-R','-j','-M','-S','-C','-a'],
            longFlags: ['--help', '--version', '--raw-output', '--compact-output', '--null-input', '--exit-status', '--slurp', '--raw-input', '--join-output', '--monochrome-output', '--sort-keys', '--tab'],
            valueFlags: { '--indent': 'int', '--arg': 'pair', '--argjson': 'pair' },
+           // jq auto-loads ~/.jq and its filters can read the process env;
+           // an isolated empty HOME keeps both from leaking anything real.
+           isolateHome: true,
            firstPositional: 'any' },
-  shasum: { flags: ['-p', '-U', '-q', '-s', '-c', '-b', '-t', '-x'], valueFlags: { '-a': 'int' }, longFlags: ['--help', '--version'] },
+  // -c is NOT here: the paths listed INSIDE a checksum file are not jailed,
+  // making -c an existence/hash oracle for any file on disk. It needs approval.
+  shasum: { flags: ['-p', '-U', '-q', '-s', '-b', '-t', '-x'], valueFlags: { '-a': 'int' }, longFlags: ['--help', '--version'] },
   md5:   { flags: ['-q', '-r', '-p'], valueFlags: { '-s': 'text' }, longFlags: [] },
 };
 
@@ -113,9 +132,39 @@ function loadConfig(installDir) {
   const p = path.join(installDir, 'config.json');
   try {
     const onDisk = JSON.parse(fs.readFileSync(p, 'utf8'));
-    Object.assign(cfg, onDisk);
-    cfg.install_dir = installDir; // never overridable from disk
+    if (onDisk && typeof onDisk === 'object' && !Array.isArray(onDisk)) {
+      // Whitelisted keys with type/range checks - never a wholesale assign:
+      // config.json feeds the jail roots and the bind address, and a bad
+      // value here (crafted installer flag, hand edit gone wrong) must not
+      // silently widen the attack surface.
+      if (Number.isInteger(onDisk.port) && onDisk.port >= 1024 && onDisk.port <= 65535) cfg.port = onDisk.port;
+      if (typeof onDisk.bind === 'string') {
+        // Loopback only, always. A non-loopback bind undoes the whole
+        // threat model; refuse it rather than trusting the file.
+        if (['127.0.0.1', '::1', 'localhost'].includes(onDisk.bind)) cfg.bind = onDisk.bind;
+      }
+      if (typeof onDisk.profile_default === 'string' && PROFILES[onDisk.profile_default]) {
+        cfg.profile_default = onDisk.profile_default;
+      }
+      if (typeof onDisk.enable_shell === 'boolean') cfg.enable_shell = onDisk.enable_shell;
+      if (Array.isArray(onDisk.read_roots_extra)) {
+        cfg.read_roots_extra = onDisk.read_roots_extra
+          .filter(r => typeof r === 'string' && path.isAbsolute(r) && r.length > 1 && r.length <= 512);
+      }
+      if (Array.isArray(onDisk.tunnel_host_suffixes)) {
+        // Force the leading dot: 'trycloudflare.com' would also match
+        // 'evil-trycloudflare.com'; '.trycloudflare.com' cannot.
+        cfg.tunnel_host_suffixes = onDisk.tunnel_host_suffixes
+          .filter(x => typeof x === 'string' && x.length > 1 && x.length <= 128)
+          .map(x => x.startsWith('.') ? x : '.' + x);
+      }
+      if (Number.isInteger(onDisk.max_body_bytes)) cfg.max_body_bytes = Math.min(Math.max(onDisk.max_body_bytes, 1024), 64 * 1024 * 1024);
+      if (Number.isInteger(onDisk.max_read_bytes)) cfg.max_read_bytes = Math.min(Math.max(onDisk.max_read_bytes, 4096), 256 * 1024 * 1024);
+      if (Number.isInteger(onDisk.exec_timeout_ms_max)) cfg.exec_timeout_ms_max = Math.min(Math.max(onDisk.exec_timeout_ms_max, 5000), 600000);
+      if (Number.isInteger(onDisk.rate_limit_per_minute)) cfg.rate_limit_per_minute = Math.min(Math.max(onDisk.rate_limit_per_minute, 10), 10000);
+    }
   } catch {}
+  cfg.install_dir = installDir; // never overridable from disk
   return cfg;
 }
 

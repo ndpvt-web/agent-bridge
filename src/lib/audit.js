@@ -1,40 +1,67 @@
 'use strict';
 // Append-only, hash-chained, HMAC-authenticated audit log.
 // Every request decision is recorded. Tampering with any entry breaks the chain.
+//
+// Appends are serialized across processes with a lockfile, and the chain head
+// is re-read from disk UNDER the lock: the server and every CLI invocation
+// are separate processes, and interleaved appends from two in-memory chain
+// heads would fork the chain (duplicate seq) and make an honest log verify
+// as "tampered".
 const fs = require('fs');
 const crypto = require('crypto');
+const { withLock } = require('./lockfile');
 
 class AuditLog {
   constructor(filePath, hmacKey) {
     this.path = filePath;
+    this.lockPath = filePath + '.lock';
     this.key = hmacKey;
     this.seq = 0;
     this.prev = '0'.repeat(64);
-    // Resume from existing log
+    this._readTail();
+  }
+
+  // Re-read the chain head (last entry) from disk. Only the tail is read:
+  // entry size is bounded (summaries are capped), so 32KB always covers the
+  // final complete line.
+  _readTail() {
     try {
-      const lines = fs.readFileSync(filePath, 'utf8').trim().split('\n').filter(Boolean);
-      if (lines.length) {
-        const last = JSON.parse(lines[lines.length - 1]);
-        this.seq = last.seq;
-        this.prev = last.mac;
-      }
+      const st = fs.statSync(this.path);
+      if (st.size === 0) return;
+      const fd = fs.openSync(this.path, 'r');
+      try {
+        const size = Math.min(st.size, 32768);
+        const buf = Buffer.alloc(size);
+        fs.readSync(fd, buf, 0, size, st.size - size);
+        const s = buf.toString('utf8').replace(/\n+$/, '');
+        const line = s.slice(s.lastIndexOf('\n') + 1);
+        if (!line) return;
+        const last = JSON.parse(line);
+        if (Number.isInteger(last.seq) && typeof last.mac === 'string') {
+          this.seq = last.seq;
+          this.prev = last.mac;
+        }
+      } finally { fs.closeSync(fd); }
     } catch {}
   }
 
   record(entry) {
-    const e = {
-      seq: this.seq + 1,
-      ts: new Date().toISOString(),
-      ...entry,
-      prev: this.prev,
-    };
-    const mac = crypto.createHmac('sha256', this.key)
-      .update(JSON.stringify(e)).digest('hex');
-    e.mac = mac;
-    fs.appendFileSync(this.path, JSON.stringify(e) + '\n', { mode: 0o600 });
-    this.seq = e.seq;
-    this.prev = mac;
-    return e;
+    return withLock(this.lockPath, () => {
+      this._readTail(); // another process may have appended since our last write
+      const e = {
+        seq: this.seq + 1,
+        ts: new Date().toISOString(),
+        ...entry,
+        prev: this.prev,
+      };
+      const mac = crypto.createHmac('sha256', this.key)
+        .update(JSON.stringify(e)).digest('hex');
+      e.mac = mac;
+      fs.appendFileSync(this.path, JSON.stringify(e) + '\n', { mode: 0o600 });
+      this.seq = e.seq;
+      this.prev = mac;
+      return e;
+    });
   }
 
   static verify(filePath, hmacKey) {

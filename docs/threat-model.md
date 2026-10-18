@@ -26,7 +26,11 @@
   stores only public keys; there is no shared secret to steal from disk,
   logs, or the pairing response. Requests bind method + path + body hash +
   timestamp (±120 s) + single-use nonce, so captured requests cannot be
-  replayed, retargeted, or tampered with.
+  replayed, retargeted, or tampered with. A nonce is burned only AFTER its
+  signature verifies: junk-signed floods can neither pre-burn a victim's
+  nonce nor evict it from the bounded cache to enable a replay.
+  Authentication failures are rate-limited (30/min/source → 429) and
+  audited in bounded form (floods cannot fill the disk).
 
 ### 2. Prompt injection → destructive command (rogue agent)
 - **v1 failure:** `POST /terminal/exec` ran any string through `zsh -l -c`.
@@ -78,8 +82,8 @@
 ### 6. Browser drive-by / DNS rebinding (remote stranger → local user)
 - **v1 failure:** `Access-Control-Allow-Origin: *` with `Authorization` in
   allowed headers invited cross-origin browser calls to the bridge.
-- **v2 defense:** no CORS headers at all; requests must carry a custom
-  header (`X-Bridge-Request: 1`) and an exact `Content-Type:
+- **v2 defense:** no CORS headers at all; BOTH `/mcp` and `/pair` require
+  a custom header (`X-Bridge-Request: 1`) and an exact `Content-Type:
   application/json`, neither of which a cross-origin browser form/fetch can
   produce without a preflight we never answer. Host header must be
   loopback or a configured tunnel hostname.
@@ -87,13 +91,15 @@
 ### 7. LAN exposure
 - **v1 failure:** bound `0.0.0.0`; anyone on the WiFi could reach the API.
 - **v2 defense:** `127.0.0.1` only. Remote access exists solely through the
-  tunnel. (A `bind` config override exists for exotic setups and prints a
-  loud warning; it is never set by the installer.)
+  tunnel. `loadConfig` refuses a non-loopback `bind` outright - config can
+  no longer widen the bind at all.
 
 ### 8. Pairing endpoint abuse
 - **Defense:** codes are 50-bit, 10-minute TTL, single-use, max 5 active;
-  failed attempts are rate-limited (6 per 10 min per source; behind the
-  tunnel the source is keyed on `CF-Connecting-IP` from loopback only).
+  failed attempts are rate-limited (6 per 10 min per source AND 60 per
+  10 min globally; behind the tunnel the source is keyed on
+  `CF-Connecting-IP` trusted only from a loopback peer - and the global
+  bucket means spoofing that header cannot reset the budget).
   Failures are audited. Pairing requires a code the human generates on the
   Mac, so throttling can never lock out the human - worst case it slows
   adding a *new* agent while an attack is ongoing.
@@ -101,7 +107,10 @@
 ### 9. Silent tampering / repudiation
 - **v2 defense:** every decision (pair, reject, rate-limit, execute, jail
   denial, capability denial, CLI approve/deny/grant) is appended to a
-  hash-chained, HMAC-authenticated JSONL audit log. `agent-bridge audit
+  hash-chained, HMAC-authenticated JSONL audit log. Appends are serialized
+  across processes under a lockfile with the chain head re-read under the
+  lock, so server and CLI entries interleave without forking the chain (an
+  honest log never reports as "tampered"). `agent-bridge audit
   --verify` proves integrity. The HMAC key is not agent-readable (the
   install dir is denied). Honest limit: verification detects edits and gaps,
   not truncation of the newest entries.
@@ -110,8 +119,11 @@
 - **v1 failure:** unpinned downloads; `kill -9` of whatever held the port;
   token printed to terminal and written to a plaintext info file.
 - **v2 defense:** Node.js and cloudflared are version-pinned and SHA-256
-  verified against upstream checksum files at install time. No sudo. No
-  secrets in terminal output or info files. Uninstaller removes everything.
+  verified against hashes embedded in the installer (fail-closed on
+  mismatch). A node/cloudflared already on PATH is used WITHOUT
+  verification, with a loud warning - remove it from PATH to force the
+  verified download. No sudo. No secrets in terminal output or info files.
+  The uninstaller keeps workspace/trash/versions unless `--purge`.
 
 ## Known limitations (honest list)
 

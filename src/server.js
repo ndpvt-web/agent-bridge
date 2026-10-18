@@ -74,18 +74,40 @@ function startServer(installDir, opts = {}) {
   }
 
   function hostAllowed(req) {
-    const host = (req.headers.host || '').split(':')[0].toLowerCase();
+    let host = (req.headers.host || '').toLowerCase();
+    // '[::1]:7899' -> '[::1]'; 'example.com:7899' -> 'example.com'
+    host = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0];
     if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return true;
     return (cfg.tunnel_host_suffixes || []).some(s => host.endsWith(s));
   }
 
+  // Real client key for rate limiting. Behind cloudflared everything arrives
+  // from loopback and the true source is CF-Connecting-IP (Cloudflare's edge
+  // overwrites it). Trusted ONLY from a loopback peer - and even then it only
+  // refines the bucket; a GLOBAL bucket bounds total failures, so a direct
+  // local client spoofing the header cannot reset its attempt budget.
+  function clientIp(req) {
+    const ra = req.socket.remoteAddress || 'unknown';
+    const loop = ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
+    const cf = loop ? req.headers['cf-connecting-ip'] : null;
+    return Array.isArray(cf) ? String(cf[0]) : (cf ? String(cf) : ra);
+  }
+
   // --- /pair ---
-  async function handlePair(req, res, clientIp) {
-    // Rate limit FAILED attempts only: brute force is throttled, legitimate
-    // pairing is never locked out by someone else's failures.
-    const blocked = limiter.count('pairfail:' + clientIp, cfg.pair_rate_limit.window_ms) >= cfg.pair_rate_limit.attempts;
-    if (blocked) {
-      audit.record({ agent: null, tool: 'pair', decision: 'rate_limited', detail: clientIp });
+  async function handlePair(req, res, ip) {
+    // Same drive-by hardening as /mcp: a cross-origin browser POST cannot
+    // send a custom header or an exact JSON content-type without a
+    // preflight, and no preflight is ever answered.
+    if (req.headers['x-bridge-request'] !== '1') return json(res, 400, { error: 'missing X-Bridge-Request header' });
+    if ((req.headers['content-type'] || '') !== 'application/json') return json(res, 415, { error: 'Content-Type must be exactly application/json' });
+    // Rate limit FAILED attempts only, in TWO buckets: per-source AND
+    // global. The per-source key can be refined by a loopback-trusted
+    // CF-Connecting-IP header; the global bucket cannot be spoofed, so the
+    // total attempt budget holds no matter what headers arrive.
+    const perSource = limiter.count('pairfail:' + ip, cfg.pair_rate_limit.window_ms);
+    const globalN = limiter.count('pairfail:*', cfg.pair_rate_limit.window_ms);
+    if (perSource >= cfg.pair_rate_limit.attempts || globalN >= cfg.pair_rate_limit.attempts * 10) {
+      audit.record({ agent: null, tool: 'pair', decision: 'rate_limited', detail: ip });
       return json(res, 429, { error: 'too many failed pairing attempts', retry_after_ms: cfg.pair_rate_limit.window_ms });
     }
     let body;
@@ -94,16 +116,21 @@ function startServer(installDir, opts = {}) {
     const code = body.pairing_code;
     const name = body.agent_name;
     const publicKey = body.public_key;
-    if (typeof code !== 'string' || typeof name !== 'string' || !name.trim()) {
-      return json(res, 400, { error: 'pairing_code and agent_name required' });
+    // Names reach the human's terminal (CLI lists them): printable only, no
+    // control characters - a forged "screen clear" is a social attack on
+    // the approver.
+    if (typeof code !== 'string' || typeof name !== 'string' || !name.trim() ||
+        name.length > 80 || !/^[\x20-\x7E\u00A0-\uFFFF]+$/.test(name)) {
+      return json(res, 400, { error: 'pairing_code and agent_name required (printable name, <= 80 chars)' });
     }
     if (typeof publicKey !== 'string' || Buffer.from(publicKey, 'base64url').length !== 32) {
       return json(res, 400, { error: 'public_key must be a base64url 32-byte Ed25519 public key' });
     }
     const consumed = keystore.consumePairingCode(code);
     if (!consumed) {
-      limiter.check('pairfail:' + clientIp, 1000000, cfg.pair_rate_limit.window_ms); // record one failure
-      audit.record({ agent: null, tool: 'pair', decision: 'rejected', detail: 'bad or expired code from ' + clientIp });
+      limiter.check('pairfail:' + ip, 1000000, cfg.pair_rate_limit.window_ms); // record one failure (per-source)
+      limiter.check('pairfail:*', 1000000, cfg.pair_rate_limit.window_ms);    // and one globally
+      audit.record({ agent: null, tool: 'pair', decision: 'rejected', detail: 'bad or expired code from ' + ip });
       return json(res, 403, { error: 'invalid, used, or expired pairing code' });
     }
     if (!PROFILES[consumed.profile]) consumed.profile = 'workspace';
@@ -139,11 +166,17 @@ function startServer(installDir, opts = {}) {
     if (typeof nonce !== 'string' || nonce.length < 16 || nonce.length > 128) {
       return { error: [401, 'bad nonce'] };
     }
-    if (nonces.seen(agentId, nonce)) return { error: [401, 'replay detected'] };
+    // Replay check WITHOUT recording: the nonce is burned only after the
+    // signature verifies. Otherwise junk-signed requests could pre-burn a
+    // victim's nonce (selective DoS) or flood the cache to evict a captured
+    // nonce and replay the captured request. No await happens between the
+    // check and the record, so check+set is atomic on the event loop.
+    if (nonces.has(agentId, nonce)) return { error: [401, 'replay detected'] };
 
     const bodyHash = bodyHashHex(rawBody);
     const canonical = canonicalString({ agentId, ts, nonce, method: req.method, path: pathName, bodyHash });
     if (!verifySignature(agent.public_key, canonical, sig)) return { error: [401, 'bad signature'] };
+    nonces.record(agentId, nonce);
     return { agent };
   }
 
@@ -164,7 +197,9 @@ function startServer(installDir, opts = {}) {
 
     if (method === 'initialize') {
       return reply({
-        protocolVersion: (rpc.params && rpc.params.protocolVersion) || PROTOCOL_VERSION,
+        // Always the server's real version: echoing the client's claim is
+        // how version-confusion downgrades start.
+        protocolVersion: PROTOCOL_VERSION,
         serverInfo: { name: 'agent-bridge', version: VERSION },
         capabilities: { tools: {} },
       });
@@ -179,7 +214,7 @@ function startServer(installDir, opts = {}) {
       const params = rpc.params || {};
       const name = params.name;
       const args = params.arguments || {};
-      const tool = tools[name];
+      const tool = (typeof name === 'string' && Object.hasOwn(tools, name)) ? tools[name] : undefined;
       if (!tool) return fail(-32602, 'unknown tool: ' + name);
       if (typeof args !== 'object' || args === null || Array.isArray(args)) {
         return fail(-32602, 'arguments must be an object');
@@ -228,19 +263,24 @@ function startServer(installDir, opts = {}) {
         return json(res, 200, { status: 'ok' }); // minimal by design
       }
       if (req.method === 'POST' && pathName === '/pair') {
-        // Behind cloudflared everything arrives from 127.0.0.1; the real
-        // source is CF-Connecting-IP. Trust it only on loopback connections.
-        const ra = req.socket.remoteAddress || 'unknown';
-        const cfIp = (ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1')
-          ? (req.headers['cf-connecting-ip'] || ra) : ra;
-        return await handlePair(req, res, Array.isArray(cfIp) ? cfIp[0] : cfIp);
+        return await handlePair(req, res, clientIp(req));
       }
       if (req.method === 'POST' && pathName === '/mcp') {
         const rawBody = await readBody(req, cfg.max_body_bytes);
         const auth = await authenticate(req, rawBody, pathName);
         if (auth.error) {
-          // Forensics: every auth failure is on the record.
-          audit.record({ agent: req.headers['x-bridge-agent'] || null, tool: 'auth', decision: 'rejected', detail: String(auth.error[1]).slice(0, 120) });
+          // Throttle authentication failures: 30/min/source -> 429.
+          const ip = clientIp(req);
+          const n = limiter.count('authfail:' + ip, 60000);
+          limiter.check('authfail:' + ip, 1000000, 60000); // record this failure
+          if (n >= 30) return json(res, 429, { error: 'too many failed authentication attempts', retry_after_ms: 60000 });
+          // Bounded forensics: an unauthenticated flood must not fill the
+          // disk. First 10 failures per source per minute are logged in
+          // full, then every 100th, always with the running count.
+          if (n < 10 || n % 100 === 0) {
+            audit.record({ agent: req.headers['x-bridge-agent'] || null, tool: 'auth', decision: 'rejected',
+              detail: String(auth.error[1]).slice(0, 120) + ' [failures this minute: ' + (n + 1) + ']' });
+          }
           return json(res, auth.error[0], { error: auth.error[1] });
         }
         keystore.touchAgent(auth.agent.id);

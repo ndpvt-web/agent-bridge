@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { withLock } = require('./lockfile');
 
 const PAIR_CODE_TTL_MS = 10 * 60 * 1000;   // pairing code valid 10 minutes
 const MAX_PAIRING_CODES = 5;
@@ -22,30 +23,10 @@ class KeyStore {
     this.lockPath = path.join(dir, '.lock');
   }
 
-  // Cross-process mutex: server and CLI both mutate these files; an unlocked
-  // read-modify-write can silently undo a revoke or lose a pairing code.
-  _locked(fn) {
-    const deadline = Date.now() + 5000;
-    for (;;) {
-      let fd;
-      try { fd = fs.openSync(this.lockPath, 'wx', 0o600); }
-      catch (e) {
-        if (e.code === 'EEXIST') {
-          try {
-            const st = fs.statSync(this.lockPath);
-            if (Date.now() - st.mtimeMs > 30000) { fs.unlinkSync(this.lockPath); continue; }
-          } catch {}
-          if (Date.now() > deadline) throw new Error('keystore locked');
-          const until = Date.now() + 25;
-          while (Date.now() < until) {}
-          continue;
-        }
-        throw e;
-      }
-      try { return fn(); }
-      finally { fs.closeSync(fd); try { fs.unlinkSync(this.lockPath); } catch {} }
-    }
-  }
+  // Cross-process mutex (shared lockfile helper, pid-liveness stale break):
+  // server and CLI both mutate these files; an unlocked read-modify-write
+  // can silently lose a revocation.
+  _locked(fn) { return withLock(this.lockPath, fn); }
 
   _readJson(p, fallback) {
     try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fallback; }
@@ -77,9 +58,14 @@ class KeyStore {
     if (codes.length >= MAX_PAIRING_CODES) throw new Error('too many active pairing codes; revoke one first');
     // Human-transcribable: 4 groups of 4 base32 chars, Crockford-ish alphabet
     const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-    const bytes = crypto.randomBytes(10);
+    // Rejection sampling: 248 = 8 * 31, so every alphabet char is exactly
+    // equally likely (plain b % 31 would over-weight the first 8 chars).
     let raw = '';
-    for (const b of bytes) raw += alphabet[b % alphabet.length];
+    while (raw.length < 10) {
+      const b = crypto.randomBytes(1)[0];
+      if (b >= 248) continue;
+      raw += alphabet[b % 31];
+    }
     const code = raw.slice(0, 4) + '-' + raw.slice(4, 8) + '-' + raw.slice(8);
     codes.push({
       code_sha256: sha256(code),
@@ -100,7 +86,10 @@ class KeyStore {
     const norm = String(code || '').toUpperCase().trim();
     const codes = this._readJson(this.codesPath, []);
     const h = sha256(norm);
-    const idx = codes.findIndex(c => c.code_sha256 === h);
+    const idx = codes.findIndex(c => {
+      const a = Buffer.from(c.code_sha256, 'utf8'), b = Buffer.from(h, 'utf8');
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
+    });
     if (idx === -1) return null;
     const c = codes[idx];
     if (c.used || Date.now() > c.expires_at) return null;

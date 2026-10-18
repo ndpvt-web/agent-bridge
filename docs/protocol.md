@@ -9,10 +9,14 @@ Framing: JSON-RPC 2.0, MCP-style methods (`initialize`, `tools/list`,
 ```
 POST /pair
 Content-Type: application/json
+X-Bridge-Request: 1
 
 { "pairing_code": "ABCD-EFGH-JK", "agent_name": "claude-desktop",
   "public_key": "<base64url 32-byte Ed25519 public key>" }
 ```
+
+`X-Bridge-Request: 1` and the exact content type are required (same CSRF
+hardening as `/mcp`). `agent_name` is printable characters only, <= 80 chars.
 
 200 → `{ "agent_id": "agt_...", "profile": "developer", ... }`.
 The code comes from `agent-bridge pair` on the Mac (10 min TTL, single-use).
@@ -37,7 +41,10 @@ agentId "\n" ts "\n" nonce "\n" METHOD "\n" path "\n" sha256hex(rawBody)
 ```
 
 Validation order: custom header → content type → agent known & not revoked
-→ timestamp within ±120 s → nonce shape → nonce unused → signature.
+→ timestamp within ±120 s → nonce shape → nonce unused → signature valid →
+nonce recorded. A nonce is burned only after the signature verifies, so
+junk-signed requests cannot poison the replay cache. Authentication
+failures are rate-limited (30/min/source → 429) and audited in bounded form.
 
 ## Methods
 
