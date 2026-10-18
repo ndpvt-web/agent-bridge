@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="assets/banner.png" alt="AgentBridge" width="100%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.png">
+  <img src="assets/banner.png" alt="AgentBridge" width="100%">
+</picture>
 
 # AgentBridge
 
@@ -16,22 +19,19 @@
 
 **Works with your agent**
 
-<table>
-  <tr>
-    <td align="center" width="170"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/instinct-dark.png"><img src="assets/logos/instinct.png" alt="Instinct" height="60"></picture></td>
-    <td align="center" width="170"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/anthropic-dark.svg"><img src="assets/logos/anthropic.svg" alt="Claude" height="60"></picture></td>
-    <td align="center" width="170"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/openai-dark.svg"><img src="assets/logos/openai.svg" alt="ChatGPT / Codex" height="60"></picture></td>
-    <td align="center" width="170"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/cursor-dark.svg"><img src="assets/logos/cursor.svg" alt="Cursor" height="60"></picture></td>
-    <td align="center" width="170"><img src="assets/logos/meta.svg" alt="Meta Muse" height="60"></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>Instinct</sub></td>
-    <td align="center"><sub>Claude</sub></td>
-    <td align="center"><sub>ChatGPT / Codex</sub></td>
-    <td align="center"><sub>Cursor</sub></td>
-    <td align="center"><sub>Meta Muse</sub></td>
-  </tr>
-</table>
+<p>
+  <img src="assets/tiles/instinct.png" alt="Instinct" width="72">
+  &nbsp;&nbsp;
+  <img src="assets/tiles/claude.png" alt="Claude" width="72">
+  &nbsp;&nbsp;
+  <img src="assets/tiles/openai.png" alt="ChatGPT and Codex" width="72">
+  &nbsp;&nbsp;
+  <img src="assets/tiles/cursor.png" alt="Cursor" width="72">
+  &nbsp;&nbsp;
+  <img src="assets/tiles/meta.png" alt="Meta Muse" width="72">
+</p>
+
+<sub>Instinct · Claude · ChatGPT · Codex · Meta Muse</sub>
 
 Any agent that can make HTTPS requests can pair - the handshake is two calls, written up in [docs/protocol.md](docs/protocol.md).
 
@@ -42,10 +42,10 @@ Any agent that can make HTTPS requests can pair - the handshake is two calls, wr
 Three steps, about a minute. No Homebrew, no npm, no account.
 
 1. **Open Terminal** - press **Command+Space**, type `Terminal`, press **Return**.
-2. **Install** - paste this one line, press **Return**:
+2. **Install** - paste this one line, press **Return** (tip: use the copy button at the top-right of the code box):
 
    ```bash
-   curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
+   curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install.sh | bash
    ```
 
    If it asks about a mode, just press **Return** (that picks SAFE, the recommended one). Done when you see **AGENTBRIDGE INSTALLED**.
@@ -66,7 +66,7 @@ Three steps, about a minute. No Homebrew, no npm, no account.
 Risky actions never run silently - they wait for your decision at the keyboard:
 
 <p align="center">
-  <img src="assets/approval-flow.png" alt="A pending request shown by agent-bridge pending, then approved once with agent-bridge approve" width="760">
+  <img src="assets/approval-flow.png" alt="A pending request shown by agent-bridge pending, then approved once with agent-bridge approve" width="680">
 </p>
 
 The yes has to come from your keyboard, on your Mac. Nothing else - not a pipe, not a script, not the agent - can approve for you.
@@ -88,7 +88,7 @@ agent-bridge mode safe    # back to safe
 Or install straight into FULL:
 
 ```bash
-curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash -s -- --mode full
+curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install.sh | bash -s -- --mode full
 ```
 
 ## How it works
@@ -99,14 +99,8 @@ sequenceDiagram
     participant M as AgentBridge (your Mac)
     A->>M: 1. Pair with the one-time code
     A->>M: 2. Signed request (Ed25519)
-    M->>M: Checked against your rules
-    alt Everyday read-only command
-        M-->>A: Runs right away
-    else Anything risky
-        M-->>A: Waits for your decision
-        Note over M: You approve or deny at the keyboard
-        M-->>A: Approved copy runs once, logged
-    end
+    M->>M: 3. Checked against your rules; risky ones wait for you
+    M-->>A: 4. Approved copy runs once, logged
 ```
 
 ## Everyday commands
