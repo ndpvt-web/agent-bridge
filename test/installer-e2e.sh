@@ -1,7 +1,9 @@
 #!/bin/bash
-# Installer end-to-end test on Linux: fake HOME, stubbed macOS bits, system
-# node/cloudflared as the PATH fallback. Verifies config generation, strict
-# --profile validation, payload extraction, plists, and the uninstaller.
+# Installer end-to-end test on Linux: fake HOME, stubbed macOS bits, and
+# pre-seeded pinned-binary stubs in the install's bin/ (there is NO PATH
+# fallback anymore - only the pinned, hash-verified builds are used).
+# Verifies config generation, strict --profile/--mode validation, payload
+# extraction, plists, effective-config banner, and the uninstaller.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 PASS=0; FAIL=0
@@ -17,13 +19,22 @@ sw_vers() { echo "15.1"; }
 launchctl() { return 0; }
 export -f uname sw_vers launchctl
 export PATH="$STUBS:$PATH"
-# fake cloudflared and node on PATH (fallback path, no downloads)
-printf '#!/bin/bash\necho cloudflared 2025.9.1\n' > "$STUBS/cloudflared"
-chmod +x "$STUBS/cloudflared"
-ln -s "$(command -v node)" "$STUBS/node"
+
+# Pre-seed the pinned-binary stubs the installer would have downloaded
+# (marker files must match the pins in install.sh).
+PIN_NODE=$(grep -oP '^NODE_VERSION="\K[^"]+' install.sh)
+PIN_CF=$(grep -oP '^CLOUDFLARED_VERSION="\K[^"]+' install.sh)
+seed_bins() {
+  mkdir -p "$FAKE/home/agent-bridge/bin"
+  ln -sf "$(command -v node)" "$FAKE/home/agent-bridge/bin/node"
+  echo "$PIN_NODE" > "$FAKE/home/agent-bridge/bin/.node-version"
+  printf '#!/bin/bash\necho cloudflared %s\n' "$PIN_CF" > "$FAKE/home/agent-bridge/bin/cloudflared"
+  chmod +x "$FAKE/home/agent-bridge/bin/cloudflared"
+  echo "$PIN_CF" > "$FAKE/home/agent-bridge/bin/.cloudflared-version"
+}
 
 run_install() {
-  (export HOME="$FAKE/home"; export -f uname sw_vers launchctl; bash ./dist/install-agent-bridge.sh "$@") 
+  (export HOME="$FAKE/home"; export -f uname sw_vers launchctl; bash ./dist/install-agent-bridge.sh "$@")
 }
 
 echo "=== installer: bad profile rejected ==="
@@ -41,7 +52,12 @@ check "non-numeric port fails" "$([ $RC -ne 0 ] && echo y)" "y"
 OUT=$(AGENT_BRIDGE_PORT=80 run_install 2>&1); RC=$?
 check "port 80 fails" "$([ $RC -ne 0 ] && echo y)" "y"
 
+echo "=== installer: unknown flag rejected ==="
+OUT=$(run_install --frob 2>&1); RC=$?
+check "unknown flag fails" "$([ $RC -ne 0 ] && echo y)" "y"
+
 echo "=== installer: happy path ==="
+seed_bins
 OUT=$(run_install --profile developer 2>&1); RC=$?
 check "install succeeds" "$RC" "0"
 CFG="$FAKE/home/agent-bridge/config.json"
@@ -56,11 +72,13 @@ check "src perms locked" "$(stat -c %a "$FAKE/home/agent-bridge/src/server.js")"
 check "server plists written" "$(ls "$FAKE/home/Library/LaunchAgents/" 2>/dev/null | wc -l)" "2"
 check "uninstaller written" "$([ -x "$FAKE/home/agent-bridge/uninstall.sh" ] && echo y)" "y"
 
-echo "=== installer: re-run keeps config ==="
-echo '{"port":7999}' > "$CFG"; chmod 600 "$CFG"
-OUT=$(run_install 2>&1); RC=$?
+echo "=== installer: re-run keeps config, banner shows EFFECTIVE config ==="
+echo '{"port":7999,"mode":"full","profile_default":"readonly","enable_shell":true}' > "$CFG"; chmod 600 "$CFG"
+OUT=$(run_install --profile developer --mode limited 2>&1); RC=$?
 check "re-run succeeds" "$RC" "0"
 check "existing config kept" "$(node -p "JSON.parse(require('fs').readFileSync('$CFG','utf8')).port" 2>/dev/null)" "7999"
+check "banner mode from config, not flags" "$(echo "$OUT" | grep -c 'Mode       : full')" "1"
+check "banner profile from config, not flags" "$(echo "$OUT" | grep -c 'Profile    : readonly')" "1"
 
 echo "=== uninstaller: keeps workspace, purge removes all ==="
 mkdir -p "$FAKE/home/agent-bridge/workspace" && touch "$FAKE/home/agent-bridge/workspace/keep.txt"

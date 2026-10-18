@@ -24,12 +24,12 @@ MODE=""
 # Pinned dependency versions AND their SHA-256 hashes, embedded in this
 # installer. Verification is fail-closed: a checksum mismatch aborts the
 # install. To upgrade, change the version and its two hashes together.
-NODE_VERSION="22.20.0"
-NODE_SHA256_ARM64="cc04a76a09f79290194c0646f48fec40354d88969bec467789a5d55dd097f949"
-NODE_SHA256_X64="00df9c5df3e4ec6848c26b70fb47bf96492f342f4bed6b17f12d99b3a45eeecc"
-CLOUDFLARED_VERSION="2025.9.1"
-CF_SHA256_ARM64="106e375d6e0f8ee77eab9ba5abc8aef93962c066bd0bf240ab8a8b21a1b58c9f"
-CF_SHA256_AMD64="a678196af2e0f870a9ab95b5696af38f74586c2db642884e14ea29adc424bec5"
+NODE_VERSION="22.23.3"
+NODE_SHA256_ARM64="23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53"
+NODE_SHA256_X64="8a677b0219178efd6eb0e475457c4afb452b521a92f6e67845a73bd85727f2a8"
+CLOUDFLARED_VERSION="2026.10.1"
+CF_SHA256_ARM64="647615df99d49cd179ea5e13ef760b9bbfb33630f6ae62f87e33dfadda60adcc"
+CF_SHA256_AMD64="3b0dbaf378337e9d7fb6cd235a76d1d6a7dee434c2d8edf9281164fb6a3837ab"
 
 info() { printf '\033[0;34m[*]\033[0m %s\n' "$1"; }
 ok()   { printf '\033[0;32m[+]\033[0m %s\n' "$1"; }
@@ -44,7 +44,7 @@ while [[ $# -gt 0 ]]; do
     --enable-shell) ENABLE_SHELL=1; shift ;;
     --mode) MODE="${2:-}"; shift 2 ;;
     --mode=*) MODE="${1#*=}"; shift ;;
-    *) shift ;;
+    *) fail "Unknown argument: $1" ;;
   esac
 done
 
@@ -62,7 +62,7 @@ if [[ -z "$MODE" ]]; then
     echo "        commands and deletions need your approval on this Mac."
     echo "    [f] FULL - v1-style full control: NO jail, NO approvals. Any paired"
     echo "        agent (or anyone who compromises one) can run anything as you."
-    read -r -p "  Mode [l/F?] (default: l): " pick
+    read -r -p "  Mode [l/f] (default: l): " pick
     case "$pick" in f|F|full) MODE="full";; *) MODE="limited";; esac
   else
     MODE="limited"
@@ -71,6 +71,7 @@ fi
 case "$MODE" in limited|full) ;; *) fail "Unknown --mode '$MODE' (want limited|full)";; esac
 [[ "$MODE" == "full" ]] && warn "FULL mode: the jail and ALL approvals are OFF. Switch back anytime: agent-bridge mode limited" 
 case "$BRIDGE_PORT" in ''|*[!0-9]*) fail "AGENT_BRIDGE_PORT must be numeric";; esac
+BRIDGE_PORT=$((10#$BRIDGE_PORT))
 [[ "$BRIDGE_PORT" -ge 1024 && "$BRIDGE_PORT" -le 65535 ]] || fail "AGENT_BRIDGE_PORT out of range"
 case "$HOME" in *[\&\<\>]*) fail "HOME contains characters unsafe for plist XML";; esac
 
@@ -89,17 +90,12 @@ chmod 700 "$BRIDGE_DIR"
 
 # --- Node.js (pinned, checksum-verified) ---
 install_node() {
-  if [[ -x "$BIN_DIR/node" ]]; then NODE_BIN="$BIN_DIR/node"; ok "Node (previously installed, pinned)"; return; fi
-  if command -v node &>/dev/null; then
-    local major
-    major=$(node --version | sed 's/v//' | cut -d. -f1)
-    if [[ "$major" -ge 18 ]]; then
-      NODE_BIN=$(command -v node)
-      warn "Using system Node $(node --version) - NOT hash-verified (pinned download skipped). Remove it from PATH to force the verified download."
-      return
-    fi
+  # No PATH fallback: only the pinned, hash-verified build is ever used. A
+  # previously installed binary is reused only when its version marker
+  # matches this installer's pin.
+  if [[ -x "$BIN_DIR/node" && -f "$BIN_DIR/.node-version" && "$(cat "$BIN_DIR/.node-version")" == "$NODE_VERSION" ]]; then
+    NODE_BIN="$BIN_DIR/node"; ok "Node v$NODE_VERSION (previously installed, pinned)"; return
   fi
-
   local fname="node-v${NODE_VERSION}-darwin-${NODE_ARCH}.tar.gz"
   local expected
   if [[ "$NODE_ARCH" == "arm64" ]]; then expected="$NODE_SHA256_ARM64"; else expected="$NODE_SHA256_X64"; fi
@@ -115,6 +111,7 @@ install_node() {
   tar -xzf "$work/node.tar.gz" -C "$work/x" --strip-components=1
   cp "$work/x/bin/node" "$BIN_DIR/node"
   chmod 755 "$BIN_DIR/node"
+  echo "$NODE_VERSION" > "$BIN_DIR/.node-version"
   rm -rf "$work"
   NODE_BIN="$BIN_DIR/node"
   ok "Node $("$NODE_BIN" --version) installed (pinned hash verified)"
@@ -122,11 +119,8 @@ install_node() {
 
 # --- cloudflared (pinned, checksum-verified) ---
 install_cloudflared() {
-  if [[ -x "$BIN_DIR/cloudflared" ]]; then CF_BIN="$BIN_DIR/cloudflared"; ok "cloudflared (previously installed, pinned)"; return; fi
-  if command -v cloudflared &>/dev/null; then
-    CF_BIN=$(command -v cloudflared)
-    warn "Using system cloudflared - NOT hash-verified (pinned download skipped). Remove it from PATH to force the verified download."
-    return
+  if [[ -x "$BIN_DIR/cloudflared" && -f "$BIN_DIR/.cloudflared-version" && "$(cat "$BIN_DIR/.cloudflared-version")" == "$CLOUDFLARED_VERSION" ]]; then
+    CF_BIN="$BIN_DIR/cloudflared"; ok "cloudflared $CLOUDFLARED_VERSION (previously installed, pinned)"; return
   fi
   local expected
   if [[ "$CF_ARCH" == "arm64" ]]; then expected="$CF_SHA256_ARM64"; else expected="$CF_SHA256_AMD64"; fi
@@ -139,6 +133,7 @@ install_cloudflared() {
   [[ "$actual" == "$expected" ]] || fail "CHECKSUM MISMATCH for cloudflared (got $actual) - aborting"
   tar -xzf "$work/cf.tgz" -C "$BIN_DIR"
   chmod 755 "$BIN_DIR/cloudflared"
+  echo "$CLOUDFLARED_VERSION" > "$BIN_DIR/.cloudflared-version"
   rm -rf "$work"
   CF_BIN="$BIN_DIR/cloudflared"
   ok "cloudflared ${CLOUDFLARED_VERSION} installed (pinned hash verified)"
@@ -188,6 +183,13 @@ CFG
 chmod 600 "$BRIDGE_DIR/config.json"
 fi
 
+# Effective settings come from the config on disk (an existing config was
+# kept above), so the final banner must describe THAT, not the flags.
+EFF_PROFILE=$("$NODE_BIN" -e "console.log(JSON.parse(require('fs').readFileSync('$BRIDGE_DIR/config.json','utf8')).profile_default||'workspace')")
+EFF_MODE=$("$NODE_BIN" -e "console.log(JSON.parse(require('fs').readFileSync('$BRIDGE_DIR/config.json','utf8')).mode||'limited')")
+EFF_SHELL=$("$NODE_BIN" -e "console.log(JSON.parse(require('fs').readFileSync('$BRIDGE_DIR/config.json','utf8')).enable_shell===true)")
+EFF_PORT=$("$NODE_BIN" -e "console.log(JSON.parse(require('fs').readFileSync('$BRIDGE_DIR/config.json','utf8')).port||$BRIDGE_PORT)")
+
 # --- launchd (auto-start on login, restart on crash) ---
 step "Setting up launchd services"
 mkdir -p "$LAUNCHD_DIR"
@@ -229,6 +231,7 @@ cat > "$LAUNCHD_DIR/com.agentbridge.tunnel.plist" << PLIST
 PLIST
 launchctl unload "$LAUNCHD_DIR/com.agentbridge.server.plist" 2>/dev/null || true
 launchctl unload "$LAUNCHD_DIR/com.agentbridge.tunnel.plist" 2>/dev/null || true
+: > "$LOG_DIR/tunnel.log"
 launchctl load "$LAUNCHD_DIR/com.agentbridge.server.plist"
 launchctl load "$LAUNCHD_DIR/com.agentbridge.tunnel.plist"
 ok "launchd services loaded"
@@ -256,10 +259,13 @@ launchctl unload ~/Library/LaunchAgents/com.agentbridge.tunnel.plist 2>/dev/null
 rm -f ~/Library/LaunchAgents/com.agentbridge.server.plist ~/Library/LaunchAgents/com.agentbridge.tunnel.plist ~/.local/bin/agent-bridge
 if [[ "${1:-}" == "--purge" ]]; then
   rm -rf ~/agent-bridge
+  [[ -d ~/agent-bridge ]] && { echo "ERROR: ~/agent-bridge still exists - remove it by hand."; exit 1; }
   echo "AgentBridge and all data removed."
 else
-  rm -rf ~/agent-bridge/src ~/agent-bridge/secrets ~/agent-bridge/approvals ~/agent-bridge/logs ~/agent-bridge/bin ~/agent-bridge/config.json ~/agent-bridge/.tunnel-url
-  echo "AgentBridge removed. Kept: ~/agent-bridge/{workspace,trash,versions}"
+  rm -rf ~/agent-bridge/src ~/agent-bridge/secrets ~/agent-bridge/approvals ~/agent-bridge/logs ~/agent-bridge/bin ~/agent-bridge/run ~/agent-bridge/config.json ~/agent-bridge/.tunnel-url
+  LEFT=""
+  for d in workspace trash versions; do [[ -e ~/agent-bridge/$d ]] && LEFT="$LEFT $d"; done
+  echo "AgentBridge removed.${LEFT:+ Kept: ~/agent-bridge/${LEFT# }}"
 fi
 UN
 chmod 755 "$BRIDGE_DIR/uninstall.sh"
@@ -271,10 +277,10 @@ echo "  |     AGENTBRIDGE INSTALLED                     |"
 echo "  ================================================"
 echo ""
 echo "  Tunnel URL : ${TUNNEL_URL:-starting - run: agent-bridge status}"
-echo "  Bind       : 127.0.0.1:${BRIDGE_PORT} (loopback only, never LAN)"
-echo "  Profile    : ${PROFILE}"
-echo "  Mode       : ${MODE}$([[ "$MODE" == "full" ]] && echo ' *** NO JAIL, NO APPROVALS ***')"
-echo "  Shell      : $([[ $ENABLE_SHELL -eq 1 ]] && echo 'enabled (EVERY call needs your approval)' || echo 'disabled')"
+echo "  Bind       : 127.0.0.1:${EFF_PORT} (loopback only, never LAN)"
+echo "  Profile    : ${EFF_PROFILE}"
+echo "  Mode       : ${EFF_MODE}$([[ "$EFF_MODE" == "full" ]] && echo ' *** NO JAIL, NO APPROVALS ***')"
+echo "  Shell      : $([[ "$EFF_SHELL" == "true" ]] && echo 'enabled (EVERY call needs your approval)' || echo 'disabled')"
 echo ""
 echo "  NEXT STEP - pair your cloud agent:"
 echo "    agent-bridge pair"
