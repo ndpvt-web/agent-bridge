@@ -79,7 +79,7 @@ function usage() {
   deny <approval_id>                              Deny a pending action
   audit [--verify]                                Show audit log stats / verify integrity
   trash                                           List trashed files + how to restore them
-  mode [limited|full]                             Show or switch the permission mode
+  mode [safe|full]                                Show or switch the permission mode (safe = limited)
   status                                          Show config summary (no secrets)
 
   Uninstall: ~/agent-bridge/uninstall.sh`);
@@ -218,11 +218,12 @@ switch (cmd) {
       if (running && running.alive) {
         console.log('Permission mode (RUNNING):    ' + running.mode.toUpperCase() + (running.mode !== cfg.mode ? '  *** restart the bridge to apply the configured mode ***' : ''));
       }
-      console.log('Switch: agent-bridge mode limited|full');
+      console.log('Switch: agent-bridge mode safe|full');
       break;
     }
-    if (rest[0] !== 'limited' && rest[0] !== 'full') { console.error('usage: agent-bridge mode limited|full'); process.exit(1); }
-    if (rest[0] === 'full') {
+    const want = rest[0] === 'safe' ? 'limited' : rest[0];
+    if (want !== 'limited' && want !== 'full') { console.error('usage: agent-bridge mode safe|full'); process.exit(1); }
+    if (want === 'full') {
       console.log('FULL mode turns OFF the filesystem jail, the command allowlist and EVERY');
       console.log('approval. Any paired agent with process rights - or anyone who compromises');
       console.log('one - can run ANY command as you on this Mac, exactly like the old v1.');
@@ -231,10 +232,10 @@ switch (cmd) {
       console.log('agent-bridge audit --verify before trusting the log again.');
       if (!confirmInteractive('Switch to FULL mode?')) { console.log('Aborted (not confirmed).'); process.exit(1); }
     }
-    onDisk.mode = rest[0];
+    onDisk.mode = want;
     fs.writeFileSync(configPath, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
-    audit.record({ agent: null, tool: 'cli.mode', decision: 'mode_' + rest[0], detail: 'permission mode set to ' + rest[0] });
-    console.log('Mode set to ' + rest[0].toUpperCase() + ' (configured). Restart the bridge to apply:');
+    audit.record({ agent: null, tool: 'cli.mode', decision: 'mode_' + want, detail: 'permission mode set to ' + want });
+    console.log('Mode set to ' + want.toUpperCase() + ' (configured). Restart the bridge to apply:');
     console.log('  launchctl unload ~/Library/LaunchAgents/com.agentbridge.server.plist && launchctl load ~/Library/LaunchAgents/com.agentbridge.server.plist');
     break;
   }

@@ -68,7 +68,8 @@ if [[ -z "$MODE" ]]; then
     MODE="limited"
   fi
 fi
-case "$MODE" in limited|full) ;; *) fail "Unknown --mode '$MODE' (want limited|full)";; esac
+[[ "$MODE" == "safe" ]] && MODE="limited"
+case "$MODE" in limited|full) ;; *) fail "Unknown --mode '$MODE' (want safe|full)";; esac
 [[ "$MODE" == "full" ]] && warn "FULL mode: the jail and ALL approvals are OFF. Switch back anytime: agent-bridge mode limited" 
 case "$BRIDGE_PORT" in ''|*[!0-9]*) fail "AGENT_BRIDGE_PORT must be numeric";; esac
 BRIDGE_PORT=$((10#$BRIDGE_PORT))
