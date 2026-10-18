@@ -260,7 +260,18 @@ tools['process.run'] = {
     // otherwise an agent could plant a binary named 'ls' and run it freely.
     const hasSlash = argv[0].includes('/');
     const agentExtra = Array.isArray(ctx.agent.allowed_programs) ? ctx.agent.allowed_programs : [];
-    const autoAllowed = !hasSlash && (PROCESS_ALLOWLIST.has(bin) || agentExtra.includes(bin));
+    let autoAllowed = !hasSlash && (PROCESS_ALLOWLIST.has(bin) || agentExtra.includes(bin));
+    // An allowlisted inspection tool must not become a jail escape:
+    // `cat /etc/passwd` reads outside the roots as surely as fs.read would.
+    // Every non-flag argument must resolve inside the workspace root.
+    // (Human-curated per-agent grants bypass this - the human owns that call.)
+    if (autoAllowed && PROCESS_ALLOWLIST.has(bin)) {
+      for (const a of argv.slice(1)) {
+        if (a.startsWith('-')) continue; // flags carry no path semantics
+        try { resolveInRoots(a, [ctx.cfg.workspace_root], cwd); }
+        catch { autoAllowed = false; break; }
+      }
+    }
     const needsApproval = !autoAllowed;
     return { summary: `run ${argv.join(' ')}`, payload: { argv, cwd, timeout, bin }, needsApproval };
   },
