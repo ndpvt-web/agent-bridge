@@ -108,6 +108,10 @@ function defaultConfig(home) {
     bind: '127.0.0.1',
     profile_default: 'workspace',
     enable_shell: false,          // install-time opt-in; even then, approval-gated
+    // 'limited' (default): jail + allowlist + on-device approvals.
+    // 'full': v1-style full control - NO jail, NO approvals, shell on.
+    // Explicit, loudly labelled opt-in; see README "Permission modes".
+    mode: 'limited',
     allowed_roots: [path.join(installDir, 'workspace')],
     workspace_root: path.join(installDir, 'workspace'),
     // Read-only extra roots are EMPTY by default: the agent sees its workspace
@@ -147,6 +151,7 @@ function loadConfig(installDir) {
         cfg.profile_default = onDisk.profile_default;
       }
       if (typeof onDisk.enable_shell === 'boolean') cfg.enable_shell = onDisk.enable_shell;
+      if (onDisk.mode === 'limited' || onDisk.mode === 'full') cfg.mode = onDisk.mode;
       if (Array.isArray(onDisk.read_roots_extra)) {
         cfg.read_roots_extra = onDisk.read_roots_extra
           .filter(r => typeof r === 'string' && path.isAbsolute(r) && r.length > 1 && r.length <= 512);

@@ -121,6 +121,63 @@ function moveToTrash(real, dest) {
   fs.unlinkSync(real);
 }
 
+// FULL mode (explicit install-time/CLI opt-in, v1-style): the jail and the
+// approval gate are OFF. These helpers collapse the roots to '/' and skip
+// the install-dir deny. Everything is still signed, rate-limited and audited.
+function readRootsFor(ctx) {
+  return ctx.fullMode
+    ? { roots: ['/'], opts: {} }
+    : { roots: ctx.readRoots, opts: { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root } };
+}
+function writeRootsFor(ctx) {
+  return ctx.fullMode
+    ? { roots: ['/'], opts: {} }
+    : { roots: [ctx.cfg.workspace_root], opts: { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root } };
+}
+
+
+// Statically resolve the local module closure of a script (require/import
+// with relative specifiers, recursively). Bound at approval time so a
+// post-approval rewrite of ANY file the script loads is refused at execute.
+// Bounded: at most 256 files. Dynamic/absolute/bare-module loads cannot be
+// enumerated; the approval line already warns about that residual class.
+function collectModuleClosure(entryReal) {
+  const seen = new Set([entryReal]);
+  const queue = [entryReal];
+  const out = [];
+  const RE = /(?:require\(\s*|import\s+(?:[^'"]*?\sfrom\s+)?|import\(\s*|export\s+[^'"]*?\sfrom\s+)['"]([^'"]+)['"]/g;
+  const PYRE = /^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))/gm;
+  while (queue.length && out.length < 256) {
+    const f = queue.shift();
+    let src;
+    try { src = fs.readFileSync(f, 'utf8'); } catch { continue; }
+    if (src.length > 4 * 1024 * 1024) continue;
+    const candidates = [];
+    let m;
+    while ((m = RE.exec(src))) {
+      const spec = m[1];
+      if (!spec.startsWith('./') && !spec.startsWith('../')) continue;
+      const base = path.resolve(path.dirname(f), spec);
+      candidates.push(base, base + '.js', base + '.mjs', base + '.cjs', base + '.json', path.join(base, 'index.js'));
+    }
+    while ((m = PYRE.exec(src))) {
+      const mod = (m[1] || m[2] || '').replace(/\./g, '/');
+      if (!mod) continue;
+      const base = path.resolve(path.dirname(f), mod);
+      candidates.push(base + '.py', path.join(base, '__init__.py'));
+    }
+    for (const cand of candidates) {
+      try {
+        const st = fs.lstatSync(cand);
+        if (!st.isFile() || st.isSymbolicLink()) continue;
+        const real = fs.realpathSync(cand);
+        if (!seen.has(real)) { seen.add(real); out.push(real); queue.push(real); }
+      } catch {}
+    }
+  }
+  return out;
+}
+
 class ToolError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }
@@ -207,7 +264,10 @@ tools['fs.list'] = {
   run(ctx, args) {
     requireCap(ctx.agent, 'fs_read');
     const p = needStr(args.path, 'path');
-    const { real } = resolveInRoots(p, ctx.readRoots, ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root });
+    const rr = readRootsFor(ctx);
+    const { real } = resolveInRoots(p, rr.roots, ctx.cfg.workspace_root, rr.opts);
+    const lst = assertRegularFileOrDir(real);
+    if (!lst.isDirectory()) throw new ToolError('not_directory', 'path is a file - use fs.read');
     const entries = fs.readdirSync(real, { withFileTypes: true }).slice(0, MAX_LIST_ENTRIES);
     ctx.audit.record({ agent: ctx.agent.id, tool: 'fs.list', decision: 'executed', detail: real });
     return {
@@ -241,7 +301,8 @@ tools['fs.read'] = {
   run(ctx, args) {
     requireCap(ctx.agent, 'fs_read');
     const p = needStr(args.path, 'path');
-    const { real } = resolveInRoots(p, ctx.readRoots, ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root });
+    const rr = readRootsFor(ctx);
+    const { real } = resolveInRoots(p, rr.roots, ctx.cfg.workspace_root, rr.opts);
     const st0 = assertRegularFileOrDir(real);
     if (st0.isDirectory()) throw new ToolError('is_directory', 'path is a directory - use fs.list');
     const maxBytes = Math.min(optInt(args.max_bytes, 'max_bytes', 1, ctx.cfg.max_read_bytes, ctx.cfg.max_read_bytes), ctx.cfg.max_read_bytes);
@@ -251,12 +312,16 @@ tools['fs.read'] = {
       const size = Math.min(st.size, maxBytes);
       const buf = Buffer.alloc(size);
       let off = 0;
-      while (off < size) { off += fs.readSync(fd, buf, off, size - off, off); }
+      while (off < size) {
+        const n = fs.readSync(fd, buf, off, size - off, off);
+        if (n === 0) break; // truncated mid-read: return what we have
+        off += n;
+      }
       const truncated = st.size > maxBytes;
       // Read access is the sensitive unapproved op: the path is on the record.
       ctx.audit.record({ agent: ctx.agent.id, tool: 'fs.read', decision: 'executed', detail: real + (truncated ? ' (truncated)' : '') });
       return {
-        path: real, size: st.size, returned_bytes: size, truncated,
+        path: real, size: st.size, returned_bytes: off, truncated: truncated || off < size,
         modified: st.mtime.toISOString(),
         content: args.encoding === 'base64' ? buf.toString('base64') : buf.toString('utf8'),
       };
@@ -290,7 +355,8 @@ tools['fs.write'] = {
     const buf = Buffer.from(args.content_base64, 'base64');
     if (buf.length > ctx.cfg.max_body_bytes) throw new ToolError('too_large', 'content exceeds limit');
     // Writes are confined to the workspace root. Never the read-only extra roots.
-    const { real } = resolveInRoots(p, [ctx.cfg.workspace_root], ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root });
+    const wr = writeRootsFor(ctx);
+    const { real } = resolveInRoots(p, wr.roots, ctx.cfg.workspace_root, wr.opts);
 
     // Reject a symlink at the lexical final component (the resolved target may
     // be inside the workspace, but silent write-through is never what you want).
@@ -299,8 +365,10 @@ tools['fs.write'] = {
 
     const existed = fs.existsSync(real);
     if (mode === 'create' && existed) throw new ToolError('exists', 'file exists (mode=create)');
+    let prevMode = null;
     if (existed) {
       const st = fs.lstatSync(real);
+      prevMode = st.mode & 0o777;
       if (st.isDirectory()) throw new ToolError('is_directory', 'path is a directory');
       if (st.isSymbolicLink()) throw new JailError('refusing to write through symlink');
       if (!st.isFile()) throw new ToolError('invalid_params', 'not a regular file');
@@ -346,6 +414,9 @@ tools['fs.write'] = {
         throw new ToolError('exists', 'file exists (mode=create)');
       }
       fs.renameSync(tmpName, real);
+      // The temp file was 0600; restore the previous permission bits so an
+      // overwrite never silently strips e.g. the exec bit.
+      if (prevMode !== null) { try { fs.chmodSync(real, prevMode); } catch {} }
     }
     ctx.audit.record({ agent: ctx.agent.id, tool: 'fs.write', decision: 'executed', detail: real + ' (' + buf.length + ' bytes, ' + mode + ')' });
     return { path: real, bytes: buf.length, mode, versioned: existed && mode !== 'append' };
@@ -363,7 +434,8 @@ tools['fs.delete'] = {
   plan(ctx, args) {
     requireCap(ctx.agent, 'fs_delete');
     const p = needStr(args.path, 'path');
-    const { real } = resolveInRoots(p, [ctx.cfg.workspace_root], ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root });
+    const wr = writeRootsFor(ctx);
+    const { real } = resolveInRoots(p, wr.roots, ctx.cfg.workspace_root, wr.opts);
     if (real === require('../lib/jail').realpathOrSelf(ctx.cfg.workspace_root)) {
       throw new ToolError('forbidden', 'refusing to delete the workspace root itself');
     }
@@ -374,7 +446,8 @@ tools['fs.delete'] = {
   },
   execute(ctx, payload) {
     // Re-validate at execution time: the world may have changed since approval.
-    const { real } = resolveInRoots(payload.real, [ctx.cfg.workspace_root], ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root });
+    const wr2 = writeRootsFor(ctx);
+    const { real } = resolveInRoots(payload.real, wr2.roots, ctx.cfg.workspace_root, wr2.opts);
     if (real !== payload.real) throw new JailError('path changed since approval - refusing');
     const st = assertRegularFileOrDir(real);
     if (st.isDirectory()) throw new JailError('target became a directory since approval - refusing');
@@ -423,7 +496,9 @@ tools['process.run'] = {
     const bin = path.basename(argv[0]);
     const timeout = optInt(args.timeout_ms, 'timeout_ms', 1000, ctx.cfg.exec_timeout_ms_max, 30000);
     let cwd = ctx.cfg.workspace_root;
-    if (args.cwd) cwd = resolveInRoots(optStr(args.cwd, 'cwd'), [ctx.cfg.workspace_root], ctx.cfg.workspace_root).real;
+    if (args.cwd) cwd = ctx.fullMode
+      ? fs.realpathSync(optStr(args.cwd, 'cwd'))
+      : resolveInRoots(optStr(args.cwd, 'cwd'), [ctx.cfg.workspace_root], ctx.cfg.workspace_root).real;
     // Auto-allow requires ALL of:
     //  1. bare program name (no slash) resolved via the scrubbed system PATH
     //     - anything else could be a planted binary;
@@ -435,35 +510,129 @@ tools['process.run'] = {
     const granted = !hasSlash && agentExtra.includes(bin);
     const grammar = PROGRAM_GRAMMARS[bin];
     const grammarOk = !hasSlash && !!grammar && grammarAllows(argv, grammar, cwd, ctx.cfg.workspace_root);
-    const autoAllowed = granted || grammarOk;
+    const autoAllowed = ctx.fullMode || granted || grammarOk;
     const needsApproval = !autoAllowed;
     // Summary must let the human see EXACTLY what runs: argv as a JSON array,
     // never an ambiguous space-joined string.
-    // Bind the approval to file CONTENT, not just argv strings: any argv
-    // element that is a regular file inside the workspace is hashed now and
-    // re-hashed at execute time. Otherwise an agent could get "node run.js"
-    // approved and then rewrite run.js before polling.
+    // Bind the approval to file CONTENT, not just argv strings - INCLUDING
+    // argv[0]. Every argv element that resolves inside the workspace MUST
+    // exist at plan time as a regular file <= 64MB and is SHA-256 bound;
+    // otherwise the approval would cover content the human never saw
+    // (a missing script written AFTER approval, a >64MB file, a symlink
+    // retargeted post-approval). Refuse those plans instead.
+    // Programs that load files NOT named in argv (interpreters requiring
+    // modules, make reading a Makefile) are flagged in the summary: the
+    // human must know the binding is exact only for the named files.
     const fileHashes = {};
-    for (let k = 1; k < argv.length; k++) {
+    const bindOne = (a) => {
+      const { real } = resolveInRoots(a, [ctx.cfg.workspace_root], cwd);
+      const st = fs.lstatSync(real); // throws ENOENT when missing -> refused
+      if (st.isSymbolicLink()) throw new ToolError('unbindable', 'cannot approve a symlinked program/input: ' + a);
+      if (!st.isFile()) throw new ToolError('unbindable', 'not a regular file: ' + a);
+      if (st.size > 64 * 1024 * 1024) throw new ToolError('unbindable', 'file too large to bind: ' + a);
+      fileHashes[real] = crypto.createHash('sha256').update(fs.readFileSync(real)).digest('hex');
+    };
+    // Which operands are FILES the command will read?
+    //  - an operand containing '/' or a file extension is path-intended: it
+    //    MUST exist at plan time and be bound (a missing one would let the
+    //    agent write the content AFTER the human approved - the round-3
+    //    CRITICAL). Refuse the plan instead.
+    //  - the first positional of an interpreter is its script: always
+    //    file-intended, whatever its name.
+    //  - a bare word without an extension (make targets, subcommands,
+    //    patterns) is not file-intended; if it happens to exist as a file we
+    //    still bind it, otherwise it is listed as unbound in the summary so
+    //    the approval is honest about what is NOT covered.
+    const SCRIPT_RUNNERS = /^(sh|bash|zsh|node|python3?|ruby|perl|php|deno|bun|lua|Rscript|swift|java)$/;
+    // `-e` / `-c` / `--eval` make the following operand CODE, not a file.
+    const hasEvalFlag = argv.slice(1).some(x => x === '-e' || x === '-c' || x === '--eval');
+    const unbound = [];
+    const closureBound = [];
+    let scriptReal = null;
+    let firstPositionalSeen = false;
+    for (let k = 0; k < argv.length; k++) {
       const a = argv[k];
       if (a.startsWith('-') || a.length > 1024) continue;
-      try {
-        const { real } = resolveInRoots(a, [ctx.cfg.workspace_root], cwd);
-        const st = fs.lstatSync(real);
-        if (st.isFile() && !st.isSymbolicLink() && st.size <= 64 * 1024 * 1024) {
-          fileHashes[real] = crypto.createHash('sha256').update(fs.readFileSync(real)).digest('hex');
+      // argv[0] without a slash resolves via the scrubbed PATH, never via
+      // cwd - it is not a workspace operand and must not be bound as one.
+      if (k === 0 && !a.includes('/')) continue;
+      const isFirstPositional = !firstPositionalSeen;
+      firstPositionalSeen = true;
+      let inJail = false, exists = false, existsFile = false;
+      try { resolveInRoots(a, [ctx.cfg.workspace_root], cwd); inJail = true; } catch {}
+      if (inJail) {
+        try {
+          const st0 = fs.lstatSync(path.isAbsolute(a) ? a : path.resolve(cwd, a));
+          exists = true;
+          existsFile = st0.isFile() && !st0.isSymbolicLink();
+        } catch {}
+      }
+      const CODE_EXT = /\.(sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php|lua|r|swift|command|applescript)$/i;
+      const scriptOperand = inJail && isFirstPositional && SCRIPT_RUNNERS.test(bin) && !hasEvalFlag;
+      // A MISSING operand is only a hard refusal when it would become CODE:
+      // an interpreter's script, or a code-extension file (it could be
+      // executed via a later-approved interpreter run with no binding). A
+      // missing DATA operand (a checklist, an output path, a target) is
+      // disclosed in the summary as NOT bound, not refused - refusing would
+      // break ordinary create-then-run flows for no code-execution gain.
+      const mustExist = inJail && !exists && (scriptOperand || CODE_EXT.test(a));
+      // Only bind when approval is coming anyway (auto-allowed grammar runs
+      // execute immediately and atomically after this plan).
+      if (!ctx.fullMode && (needsApproval || hasSlash)) {
+        if (existsFile || mustExist) {
+          try { bindOne(a); }
+          catch (e) {
+            if (e instanceof ToolError) throw e;
+            throw new ToolError('unbindable', 'cannot approve: ' + a + ' does not exist yet inside the workspace - create it first, then request approval');
+          }
+          if (scriptOperand && /\.(js|mjs|cjs|py)$/i.test(a)) {
+            scriptReal = fs.realpathSync(path.isAbsolute(a) ? a : path.resolve(cwd, a));
+          }
+        } else if (inJail && !exists) {
+          unbound.push(a);
         }
-      } catch { /* not an in-jail file: nothing to bind */ }
+        // exists-but-not-a-regular-file (a directory operand like `ls .` or
+        // a jq filter '.') is not file-intended: nothing to bind.
+      }
     }
-    const summary = 'run argv=' + JSON.stringify(argv) + (args.cwd ? ' cwd=' + cwd : '');
+    // Interpreters and build tools read files beyond argv (requires,
+    // imports, Makefiles). The human must see that on the approval line.
+    const INDIRECT = /^(node|python3?|ruby|perl|php|zsh|bash|sh|make|npm|npx|yarn|xcodebuild|swift|swiftc|xcrun|deno|bun|java|lua|Rscript)$/;
+    // Bind the static module closure of a bound script, so post-approval
+    // rewrites of required/imported local files are also refused at execute.
+    if (scriptReal) {
+      for (const dep of collectModuleClosure(scriptReal)) {
+        if (fileHashes[dep]) continue;
+        try {
+          const st = fs.lstatSync(dep);
+          if (!st.isFile() || st.isSymbolicLink() || st.size > 64 * 1024 * 1024) { unbound.push(dep); continue; }
+          fileHashes[dep] = crypto.createHash('sha256').update(fs.readFileSync(dep)).digest('hex');
+          closureBound.push(dep);
+        } catch { unbound.push(dep); }
+      }
+    }
+    const indirectNote = INDIRECT.test(bin) ? ' WARNING: ' + bin + ' can load files beyond the ' + closureBound.length + ' bound module(s) (dynamic imports, native modules, config) whose content is NOT bound' : '';
+    const unboundNote = unbound.length ? ' NOTE: operand(s) ' + unbound.map(x => JSON.stringify(x)).join(', ') + ' did not exist at approval time and are NOT bound' : '';
+    const summary = 'run argv=' + JSON.stringify(argv) + (args.cwd ? ' cwd=' + cwd : '') + indirectNote + unboundNote;
     return { summary, payload: { argv, cwd, timeout, bin, file_hashes: fileHashes }, needsApproval };
   },
   execute(ctx, payload) {
     // Re-validate cwd at execution time: it may have been swapped for a
     // symlink between approval and execution.
-    const cwd = resolveInRoots(payload.cwd, [ctx.cfg.workspace_root], ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root }).real;
+    const cwd = ctx.fullMode
+      ? payload.cwd
+      : resolveInRoots(payload.cwd, [ctx.cfg.workspace_root], ctx.cfg.workspace_root, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root }).real;
     // Content binding from plan(): refuse to run if an approved input file
-    // was rewritten after the human said yes.
+    // was rewritten after the human said yes. argv[0] with a slash is
+    // re-resolved through the jail and symlink-checked too.
+    if (!ctx.fullMode && payload.argv[0].includes('/')) {
+      const { real } = resolveInRoots(payload.argv[0], [ctx.cfg.workspace_root], cwd, { installDir: ctx.cfg.install_dir, workspaceRoot: ctx.cfg.workspace_root });
+      const st = fs.lstatSync(real);
+      if (st.isSymbolicLink()) throw new ToolError('changed', 'program is a symlink - refusing');
+      if (real !== payload.argv[0] && !payload.file_hashes?.[real] && !payload.file_hashes?.[payload.argv[0]]) {
+        throw new ToolError('changed', 'program path changed since approval - refusing');
+      }
+    }
     if (payload.file_hashes) {
       for (const [p, h] of Object.entries(payload.file_hashes)) {
         let cur;
@@ -518,15 +687,22 @@ tools['shell.exec'] = {
   },
   approval: 'shell',
   plan(ctx, args) {
-    requireCap(ctx.agent, 'shell'); // profiles gate what agents may even request
-    if (!ctx.cfg.enable_shell) {
-      throw new ToolError('disabled', 'shell.exec is disabled on this bridge (install with --enable-shell to allow, still approval-gated)');
+    if (!ctx.fullMode) {
+      requireCap(ctx.agent, 'shell'); // profiles gate what agents may even request
+      if (!ctx.cfg.enable_shell) {
+        throw new ToolError('disabled', 'shell.exec is disabled on this bridge (install with --enable-shell to allow, still approval-gated)');
+      }
     }
     const command = needStr(args.command, 'command', 8192);
     const timeout = optInt(args.timeout_ms, 'timeout_ms', 1000, ctx.cfg.exec_timeout_ms_max, 30000);
     let cwd = ctx.cfg.workspace_root;
-    if (args.cwd) cwd = resolveInRoots(optStr(args.cwd, 'cwd'), [ctx.cfg.workspace_root], ctx.cfg.workspace_root).real;
-    return { summary: `shell: ${command}`, payload: { command, cwd, timeout }, needsApproval: true };
+    if (args.cwd) cwd = ctx.fullMode
+      ? fs.realpathSync(optStr(args.cwd, 'cwd'))
+      : resolveInRoots(optStr(args.cwd, 'cwd'), [ctx.cfg.workspace_root], ctx.cfg.workspace_root).real;
+    // A shell command's files cannot be enumerated or bound. Say so on the
+    // approval line - the human is approving the command TEXT only.
+    const summary = 'shell: ' + command + ' WARNING: shell commands read files not shown here; only this text is bound';
+    return { summary, payload: { command, cwd, timeout }, needsApproval: !ctx.fullMode };
   },
   execute(ctx, payload) {
     return tools['process.run'].execute(ctx, {

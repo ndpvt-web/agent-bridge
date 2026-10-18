@@ -38,8 +38,14 @@
   (`rm -rf "$HOME"`, base64, variable indirection, …).
 - **v2 defense:** no shell in the API. Capabilities only. Irreversible or
   elevated operations (delete, non-allowlisted programs, opt-in shell)
-  require a human approval on the Mac, bound to the exact planned action,
-  single-use, 120 s TTL, default deny. The agent cannot approve anything
+  require a human approval on the Mac, bound to the exact planned action:
+  the argv plus the SHA-256 of every workspace file named in it (which must
+  exist at approval time; a plan naming a missing, symlinked, or >64 MB file
+  is refused rather than approved unbound), single-use, 120 s TTL, default
+  deny. Interpreters and build tools read files beyond the named argv
+  (imports, Makefiles); those contents cannot be bound, and the approval
+  line says so explicitly. Auto-allowed commands are additionally bounded by
+  a 300 s execution timeout and per-agent rate limits. The agent cannot approve anything
   itself and cannot widen its own permissions: per-agent program grants are
   set exclusively by the CLI on the Mac.
 

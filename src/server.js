@@ -43,6 +43,11 @@ function startServer(installDir, opts = {}) {
   const bootTime = Date.now(); // timestamps older than boot are always rejected (nonce cache is in-memory)
 
   const readRoots = [cfg.workspace_root, ...(cfg.read_roots_extra || [])];
+  const fullMode = cfg.mode === 'full';
+  if (fullMode) {
+    console.warn('[agent-bridge] *** FULL PERMISSION MODE: no jail, no approvals, shell enabled. Every paired agent has full control of this account. Switch back: agent-bridge mode limited ***');
+    audit.record({ agent: null, tool: 'server', decision: 'started_full_mode', detail: 'FULL permission mode active' });
+  }
 
   function json(res, code, obj) {
     const body = JSON.stringify(obj);
@@ -75,8 +80,17 @@ function startServer(installDir, opts = {}) {
 
   function hostAllowed(req) {
     let host = (req.headers.host || '').toLowerCase();
-    // '[::1]:7899' -> '[::1]'; 'example.com:7899' -> 'example.com'
-    host = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0];
+    // '[::1]:7899' -> '[::1]'; 'example.com:7899' -> 'example.com'.
+    // Strict: after ']', only :port may follow - '[::1]evil.example' is junk.
+    if (host.startsWith('[')) {
+      const close = host.indexOf(']');
+      if (close === -1) return false;
+      const rest = host.slice(close + 1);
+      if (rest !== '' && !/^:\d+$/.test(rest)) return false;
+      host = host.slice(0, close + 1);
+    } else {
+      host = host.split(':')[0];
+    }
     if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return true;
     return (cfg.tunnel_host_suffixes || []).some(s => host.endsWith(s));
   }
@@ -107,7 +121,11 @@ function startServer(installDir, opts = {}) {
     const perSource = limiter.count('pairfail:' + ip, cfg.pair_rate_limit.window_ms);
     const globalN = limiter.count('pairfail:*', cfg.pair_rate_limit.window_ms);
     if (perSource >= cfg.pair_rate_limit.attempts || globalN >= cfg.pair_rate_limit.attempts * 10) {
-      audit.record({ agent: null, tool: 'pair', decision: 'rate_limited', detail: ip });
+      // Log only the first rate-limited attempt per window: a flood must not
+      // convert throttled RESPONSES into unbounded audit WRITES.
+      if (globalN === cfg.pair_rate_limit.attempts * 10) {
+        audit.record({ agent: null, tool: 'pair', decision: 'rate_limited', detail: 'global threshold hit' });
+      }
       return json(res, 429, { error: 'too many failed pairing attempts', retry_after_ms: cfg.pair_rate_limit.window_ms });
     }
     let body;
@@ -119,9 +137,13 @@ function startServer(installDir, opts = {}) {
     // Names reach the human's terminal (CLI lists them): printable only, no
     // control characters - a forged "screen clear" is a social attack on
     // the approver.
+    // Names reach the human's terminal. Block control chars AND Unicode
+    // format characters (bidi overrides, zero-width, U+2028/9): a name that
+    // visually reorders or hides text is a social attack on the approver.
     if (typeof code !== 'string' || typeof name !== 'string' || !name.trim() ||
-        name.length > 80 || !/^[\x20-\x7E\u00A0-\uFFFF]+$/.test(name)) {
-      return json(res, 400, { error: 'pairing_code and agent_name required (printable name, <= 80 chars)' });
+        name.length > 80 || !/^[\x20-\x7E\u00A0-\uFFFF]+$/.test(name) ||
+        /[\p{Cf}\u2028\u2029]/u.test(name)) {
+      return json(res, 400, { error: 'pairing_code and agent_name required (printable name, <= 80 chars, no format characters)' });
     }
     if (typeof publicKey !== 'string' || Buffer.from(publicKey, 'base64url').length !== 32) {
       return json(res, 400, { error: 'public_key must be a base64url 32-byte Ed25519 public key' });
@@ -129,8 +151,12 @@ function startServer(installDir, opts = {}) {
     const consumed = keystore.consumePairingCode(code);
     if (!consumed) {
       limiter.check('pairfail:' + ip, 1000000, cfg.pair_rate_limit.window_ms); // record one failure (per-source)
+      const g = limiter.count('pairfail:*', cfg.pair_rate_limit.window_ms);
       limiter.check('pairfail:*', 1000000, cfg.pair_rate_limit.window_ms);    // and one globally
-      audit.record({ agent: null, tool: 'pair', decision: 'rejected', detail: 'bad or expired code from ' + ip });
+      // Bounded forensics: first 10 failures per window in full, then every 100th.
+      if (g < 10 || g % 100 === 0) {
+        audit.record({ agent: null, tool: 'pair', decision: 'rejected', detail: 'bad or expired code from ' + ip + ' [failures this window: ' + (g + 1) + ']' });
+      }
       return json(res, 403, { error: 'invalid, used, or expired pairing code' });
     }
     if (!PROFILES[consumed.profile]) consumed.profile = 'workspace';
@@ -160,7 +186,10 @@ function startServer(installDir, opts = {}) {
     if (agent.revoked) return { error: [401, 'agent revoked'] };
 
     const tsNum = Number(ts);
-    if (!Number.isFinite(tsNum) || Math.abs(Date.now() - tsNum) > 120000 || tsNum < bootTime - 120000) {
+    // Strict: nothing signed before this process booted. The nonce cache is
+    // in-memory, so accepting pre-boot timestamps re-opens replay across a
+    // restart.
+    if (!Number.isFinite(tsNum) || Math.abs(Date.now() - tsNum) > 120000 || tsNum < bootTime) {
       return { error: [401, 'timestamp outside +/-120s window'] };
     }
     if (typeof nonce !== 'string' || nonce.length < 16 || nonce.length > 128) {
@@ -193,7 +222,7 @@ function startServer(installDir, opts = {}) {
     if (!rl.allowed) return fail(-32029, 'rate limited', { retry_after_ms: rl.retryAfterMs });
 
     const method = rpc.method;
-    const ctx = { cfg, agent, approvals, audit, keystore, readRoots, version: VERSION };
+    const ctx = { cfg, agent, approvals, audit, keystore, readRoots, version: VERSION, fullMode };
 
     if (method === 'initialize') {
       return reply({
@@ -227,7 +256,7 @@ function startServer(installDir, opts = {}) {
         }
         const plan = tool.plan(ctx, args);
         const always = tool.approval !== 'conditional';
-        if (always || plan.needsApproval) {
+        if (!fullMode && (always || plan.needsApproval)) {
           const kind = tool.approval === 'conditional' ? 'process' : tool.approval;
           const result = pendingResult(ctx, kind, name, plan.summary, plan.payload);
           return reply({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result });
@@ -269,17 +298,22 @@ function startServer(installDir, opts = {}) {
         const rawBody = await readBody(req, cfg.max_body_bytes);
         const auth = await authenticate(req, rawBody, pathName);
         if (auth.error) {
-          // Throttle authentication failures: 30/min/source -> 429.
+          // Throttle authentication failures: 30/min/source AND 300/min
+          // global (a loopback client rotating CF-Connecting-IP cannot reset
+          // its budget).
           const ip = clientIp(req);
           const n = limiter.count('authfail:' + ip, 60000);
+          const g = limiter.count('authfail:*', 60000);
           limiter.check('authfail:' + ip, 1000000, 60000); // record this failure
-          if (n >= 30) return json(res, 429, { error: 'too many failed authentication attempts', retry_after_ms: 60000 });
-          // Bounded forensics: an unauthenticated flood must not fill the
-          // disk. First 10 failures per source per minute are logged in
-          // full, then every 100th, always with the running count.
-          if (n < 10 || n % 100 === 0) {
+          limiter.check('authfail:*', 1000000, 60000);
+          if (n >= 30 || g >= 300) return json(res, 429, { error: 'too many failed authentication attempts', retry_after_ms: 60000 });
+          // Bounded forensics keyed GLOBALLY: an unauthenticated flood must
+          // not fill the disk no matter how source headers rotate. First 10
+          // failures per minute are logged in full, then every 100th, always
+          // with the running count.
+          if (g < 10 || g % 100 === 0) {
             audit.record({ agent: req.headers['x-bridge-agent'] || null, tool: 'auth', decision: 'rejected',
-              detail: String(auth.error[1]).slice(0, 120) + ' [failures this minute: ' + (n + 1) + ']' });
+              detail: String(auth.error[1]).slice(0, 120) + ' [failures this minute: ' + (g + 1) + ']' });
           }
           return json(res, auth.error[0], { error: auth.error[1] });
         }

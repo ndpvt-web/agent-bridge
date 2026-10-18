@@ -11,6 +11,8 @@ const { withLock } = require('./lockfile');
 
 const APPROVAL_TTL_MS = 120 * 1000;
 const MAX_PENDING = 100;   // backlog cap: an agent cannot flood the human
+const MAX_PENDING_PER_AGENT = 25; // and one agent cannot starve the others
+const EXECUTING_STALE_MS = 10 * 60 * 1000; // a crashed execution is retryable
 const TERMINAL_KEPT = 200; // forensic retention for decided records
 
 class Approvals {
@@ -65,6 +67,11 @@ class Approvals {
         err.code = 'too_many_pending';
         throw err;
       }
+      if (open.filter(x => isLivePending(x) && x.agent_id === agentId).length >= MAX_PENDING_PER_AGENT) {
+        const err = new Error('too many pending approvals from this agent (' + MAX_PENDING_PER_AGENT + ') - let the human decide some first');
+        err.code = 'too_many_pending';
+        throw err;
+      }
       const terminal = all.filter(x => !isOpen(x)).slice(-TERMINAL_KEPT);
       this._write([...terminal, ...open, a]);
     });
@@ -100,6 +107,13 @@ class Approvals {
     const a = this._read().find(x => x.id === id);
     if (!a) return { state: 'unknown' };
     if (a.status === 'pending' && Date.now() > a.expires_at) return { state: 'expired' };
+    // A server crash mid-execution must not brick the approval forever:
+    // an 'executing' record older than the staleness window is retryable.
+    if (a.status === 'executing' && a.execution_started_at &&
+        Date.now() - Date.parse(a.execution_started_at) > EXECUTING_STALE_MS) {
+      this.failExecution(id); // back to 'approved'
+      a.status = 'approved';
+    }
     return { state: a.status, approval: a };
   }
 

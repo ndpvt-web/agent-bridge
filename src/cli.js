@@ -18,12 +18,18 @@ const audit = new AuditLog(path.join(installDir, 'logs', 'audit.jsonl'), keystor
 // Programs that are shells in disguise: granting them to an agent grants
 // full code execution for that agent. We allow it - the human owns the Mac -
 // but never silently.
-const DANGEROUS_PROGRAMS = new Set(['node','python3','python','ruby','perl','php','zsh','bash','sh','npm','npx','yarn','make','xcodebuild','swift','swiftc','xcrun','git','curl','wget','osascript','defaults','launchctl','crontab','tar','zip','find','sed','awk','ssh','scp','rsync','docker','brew','vim','vi','nvim','view','less','more','man','nano','emacs','ed','ex','sqlite3','script','env','ftp','telnet','lldb','gdb','screen','tmux','expect']);
+const DANGEROUS_PROGRAMS = new Set(['node','python3','python','ruby','perl','php','zsh','bash','sh','npm','npx','yarn','make','xcodebuild','swift','swiftc','xcrun','git','curl','wget','osascript','defaults','launchctl','crontab','tar','zip','find','sed','awk','ssh','scp','rsync','docker','brew','vim','vi','nvim','view','less','more','man','nano','emacs','ed','ex','sqlite3','script','env','ftp','telnet','lldb','gdb','screen','tmux','expect','rg','xargs','parallel','watch','nohup','nice','stdbuf','timeout','java','jshell','deno','bun','lua','Rscript','tclsh','wish','at','batch','open','automator','shortcuts','sudo','doas','su','sort','dd','lldb']);
 
 // Print a value exactly as stored - no control characters reach the terminal,
-// no padding tricks, no forged lines.
+// no padding tricks, no forged lines. JSON.stringify covers C0/C1; Unicode
+// format characters (bidi overrides, zero-width, U+2028/9) are escaped on
+// top - a Trojan-Source-style spoof of the approval display is otherwise
+// possible.
+function escapeFormatChars(str) {
+  return str.replace(/[\p{Cf}\u2028\u2029]/gu, c => '\\u' + c.codePointAt(0).toString(16).padStart(4, '0'));
+}
 function showEscaped(label, val) {
-  console.log('  ' + label + ': ' + JSON.stringify(String(val)));
+  console.log('  ' + label + ': ' + escapeFormatChars(JSON.stringify(String(val))));
 }
 
 function showApproval(a) {
@@ -59,6 +65,7 @@ function usage() {
   deny <approval_id>                              Deny a pending action
   audit [--verify]                                Show audit log stats / verify integrity
   trash                                           List trashed files + how to restore them
+  mode [limited|full]                             Show or switch the permission mode
   status                                          Show config summary (no secrets)`);
 }
 
@@ -80,7 +87,7 @@ switch (cmd) {
     const agents = keystore.listAgents();
     if (!agents.length) { console.log('No paired agents.'); break; }
     for (const a of agents) {
-      console.log(`${a.revoked ? '[REVOKED] ' : ''}${a.id}  ${JSON.stringify(a.name)}  profile=${a.profile}  paired=${a.created_at}${a.last_seen_at ? '  last_seen=' + a.last_seen_at : ''}`);
+      console.log(`${a.revoked ? '[REVOKED] ' : ''}${a.id}  ${escapeFormatChars(JSON.stringify(a.name))}  profile=${a.profile}  paired=${a.created_at}${a.last_seen_at ? '  last_seen=' + a.last_seen_at : ''}`);
     }
     break;
   }
@@ -88,11 +95,14 @@ switch (cmd) {
   case 'disallow': {
     if (!rest[0] || !rest[1]) { console.error('usage: agent-bridge ' + cmd + ' <agent_id> <program>'); process.exit(1); }
     const prog = path.basename(rest[1]); // bare names only, resolved via system PATH
-    if (cmd === 'allow' && DANGEROUS_PROGRAMS.has(prog)) {
-      console.log('WARNING: ' + prog + ' can run arbitrary code. Granting it to an agent');
-      console.log('gives that agent full control of this Mac account. It stays logged,');
-      console.log('and you can undo anytime: agent-bridge disallow ' + rest[0] + ' ' + prog);
-      if (!confirmInteractive('Grant anyway?')) { console.log('Aborted (not confirmed).'); process.exit(1); }
+    if (cmd === 'allow') {
+      console.log('WARNING: a grant runs OUTSIDE the filesystem jail and the argument rules.');
+      console.log(prog + ' will run with ANY arguments against your ENTIRE disk as you.');
+      if (DANGEROUS_PROGRAMS.has(prog)) {
+        console.log(prog + ' can also execute arbitrary code - this grants FULL CONTROL of this account.');
+      }
+      console.log('It stays logged; undo anytime: agent-bridge disallow ' + rest[0] + ' ' + prog);
+      if (!confirmInteractive('Grant ' + prog + ' anyway?')) { console.log('Aborted (not confirmed).'); process.exit(1); }
     }
     const ok = keystore.setProgramAllowed(rest[0], prog, cmd === 'allow');
     if (ok) audit.record({ agent: rest[0], tool: 'cli.' + cmd, decision: cmd === 'allow' ? 'program_granted' : 'program_revoked', detail: prog });
@@ -144,7 +154,7 @@ switch (cmd) {
       console.log(lines.length + ' audit entries. Last 10:');
       for (const l of lines.slice(-10)) {
         const e = JSON.parse(l);
-        console.log(`  #${e.seq} ${e.ts} ${e.agent || '-'} ${e.tool} ${e.decision}${e.detail ? ' - ' + JSON.stringify(e.detail) : ''}`);
+        console.log(`  #${e.seq} ${e.ts} ${e.agent || '-'} ${e.tool} ${e.decision}${e.detail ? ' - ' + escapeFormatChars(JSON.stringify(e.detail)) : ''}`);
       }
     } catch { console.log('No audit log yet.'); }
     break;
@@ -155,11 +165,35 @@ switch (cmd) {
     const bind = cfg.bind || '127.0.0.1';
     console.log('  bind        : ' + bind + ':' + cfg.port + (bind === '127.0.0.1' ? ' (loopback only)' : ' *** NOT LOOPBACK - exposed to the network ***'));
     console.log('  profile     : ' + (cfg.profile_default || 'workspace'));
-    console.log('  shell       : ' + (cfg.enable_shell ? 'ENABLED (approval-gated)' : 'disabled'));
+    console.log('  mode        : ' + (cfg.mode === 'full' ? '*** FULL - no jail, no approvals ***' : 'limited (jail + approvals)'));
+    console.log('  shell       : ' + (cfg.enable_shell || cfg.mode === 'full' ? 'ENABLED' + (cfg.mode === 'full' ? ' (full mode, no approval)' : ' (approval-gated)') : 'disabled'));
     console.log('  workspace   : ' + cfg.workspace_root);
     console.log('  read roots  : ' + JSON.stringify([cfg.workspace_root, ...(cfg.read_roots_extra || [])]));
     console.log('  agents      : ' + keystore.listAgents().filter(a => !a.revoked).length + ' active');
     try { console.log('  tunnel URL  : ' + fs.readFileSync(path.join(installDir, '.tunnel-url'), 'utf8').trim()); } catch { console.log('  tunnel URL  : (unknown yet - check logs/tunnel.log)'); }
+    break;
+  }
+  case 'mode': {
+    const configPath = path.join(installDir, 'config.json');
+    let onDisk = {};
+    try { onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+    if (!rest[0]) {
+      console.log('Permission mode: ' + (cfg.mode === 'full' ? 'FULL (no jail, no approvals - every agent has full control)' : 'LIMITED (jail + allowlist + your approvals)'));
+      console.log('Switch: agent-bridge mode limited|full');
+      break;
+    }
+    if (rest[0] !== 'limited' && rest[0] !== 'full') { console.error('usage: agent-bridge mode limited|full'); process.exit(1); }
+    if (rest[0] === 'full') {
+      console.log('FULL mode turns OFF the filesystem jail, the command allowlist and EVERY');
+      console.log('approval. Any paired agent - or anyone who compromises one - can run ANY');
+      console.log('command as you on this Mac, exactly like the old v1. This stays logged.');
+      if (!confirmInteractive('Switch to FULL mode?')) { console.log('Aborted (not confirmed).'); process.exit(1); }
+    }
+    onDisk.mode = rest[0];
+    fs.writeFileSync(configPath, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
+    audit.record({ agent: null, tool: 'cli.mode', decision: 'mode_' + rest[0], detail: 'permission mode set to ' + rest[0] });
+    console.log('Mode set to ' + rest[0].toUpperCase() + '. Restart the bridge to apply:');
+    console.log('  launchctl unload ~/Library/LaunchAgents/com.agentbridge.server.plist && launchctl load ~/Library/LaunchAgents/com.agentbridge.server.plist');
     break;
   }
   case 'trash': {

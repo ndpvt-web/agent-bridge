@@ -8,8 +8,9 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/redteam/run.mjs && node test/redteam/round2.mjs && node test/redteam/round3.mjs && node test/redteam/round4.mjs && node test/redteam/round5.mjs && node test/redteam/round6.mjs && node test/e2e.mjs && bash test/installer-e2e.sh",
-    "redteam": "node test/redteam/run.mjs"
+    "test": "node test/redteam/run.mjs && node test/redteam/round2.mjs && node test/redteam/round3.mjs && node test/redteam/round4.mjs && node test/redteam/round5.mjs && node test/redteam/round6.mjs && node test/redteam/round7.mjs && node test/e2e.mjs && bash test/installer-e2e.sh",
+    "redteam": "node test/redteam/run.mjs",
+    "pretest": "bash scripts/build-installer.sh"
   },
   "engines": {
     "node": ">=18"

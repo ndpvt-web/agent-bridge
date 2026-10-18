@@ -19,6 +19,7 @@ BIN_DIR="$BRIDGE_DIR/bin"
 LAUNCHD_DIR="$HOME/Library/LaunchAgents"
 PROFILE="workspace"
 ENABLE_SHELL=0
+MODE=""
 
 # Pinned dependency versions AND their SHA-256 hashes, embedded in this
 # installer. Verification is fail-closed: a checksum mismatch aborts the
@@ -41,6 +42,8 @@ while [[ $# -gt 0 ]]; do
     --profile) PROFILE="${2:-}"; shift 2 ;;
     --profile=*) PROFILE="${1#*=}"; shift ;;
     --enable-shell) ENABLE_SHELL=1; shift ;;
+    --mode) MODE="${2:-}"; shift 2 ;;
+    --mode=*) MODE="${1#*=}"; shift ;;
     *) shift ;;
   esac
 done
@@ -50,6 +53,23 @@ done
 # values, never arbitrary text (a crafted --profile must not inject JSON
 # keys into config.json).
 case "$PROFILE" in readonly|workspace|developer) ;; *) fail "Unknown --profile '$PROFILE' (want readonly|workspace|developer)";; esac
+# Permission mode: ask once, plainly. Default is the safe one.
+if [[ -z "$MODE" ]]; then
+  if [[ -t 0 ]]; then
+    echo ""
+    echo "  Choose a permission mode:"
+    echo "    [l] LIMITED (recommended) - agents work inside a folder jail; risky"
+    echo "        commands and deletions need your approval on this Mac."
+    echo "    [f] FULL - v1-style full control: NO jail, NO approvals. Any paired"
+    echo "        agent (or anyone who compromises one) can run anything as you."
+    read -r -p "  Mode [l/F?] (default: l): " pick
+    case "$pick" in f|F|full) MODE="full";; *) MODE="limited";; esac
+  else
+    MODE="limited"
+  fi
+fi
+case "$MODE" in limited|full) ;; *) fail "Unknown --mode '$MODE' (want limited|full)";; esac
+[[ "$MODE" == "full" ]] && warn "FULL mode: the jail and ALL approvals are OFF. Switch back anytime: agent-bridge mode limited" 
 case "$BRIDGE_PORT" in ''|*[!0-9]*) fail "AGENT_BRIDGE_PORT must be numeric";; esac
 [[ "$BRIDGE_PORT" -ge 1024 && "$BRIDGE_PORT" -le 65535 ]] || fail "AGENT_BRIDGE_PORT out of range"
 case "$HOME" in *[\&\<\>]*) fail "HOME contains characters unsafe for plist XML";; esac
@@ -161,7 +181,8 @@ cat > "$BRIDGE_DIR/config.json" << CFG
   "port": $BRIDGE_PORT,
   "bind": "127.0.0.1",
   "profile_default": "$PROFILE",
-  "enable_shell": $([[ $ENABLE_SHELL -eq 1 ]] && echo true || echo false)
+  "enable_shell": $([[ $ENABLE_SHELL -eq 1 ]] && echo true || echo false),
+  "mode": "$MODE"
 }
 CFG
 chmod 600 "$BRIDGE_DIR/config.json"
@@ -252,6 +273,7 @@ echo ""
 echo "  Tunnel URL : ${TUNNEL_URL:-starting - run: agent-bridge status}"
 echo "  Bind       : 127.0.0.1:${BRIDGE_PORT} (loopback only, never LAN)"
 echo "  Profile    : ${PROFILE}"
+echo "  Mode       : ${MODE}$([[ "$MODE" == "full" ]] && echo ' *** NO JAIL, NO APPROVALS ***')"
 echo "  Shell      : $([[ $ENABLE_SHELL -eq 1 ]] && echo 'enabled (EVERY call needs your approval)' || echo 'disabled')"
 echo ""
 echo "  NEXT STEP - pair your cloud agent:"
