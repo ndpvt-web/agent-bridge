@@ -65,9 +65,12 @@ When a call needs on-device approval, `tools/call` returns 200 with:
 ```
 
 Poll `approval.status` with the `approval_id`. States: `pending`,
-`expired`, `denied`, `executed`, `already_executed`, `forbidden`.
-An approved action executes exactly once, on the first poll after approval,
-and only for the agent that requested it.
+`expired`, `denied`, `executed`, `execution_failed`, `already_executed`,
+`forbidden`. An approved action executes exactly once, on the first poll
+after approval, and only for the agent that requested it. A failed
+execution is consumed (`execution_failed`) - request a fresh approval
+rather than retrying. For `process.run`, every workspace file named in the
+argv is frozen at request time and the run executes the frozen copies.
 
 ## Errors
 

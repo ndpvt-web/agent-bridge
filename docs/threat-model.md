@@ -39,11 +39,16 @@
 - **v2 defense:** no shell in the API. Capabilities only. Irreversible or
   elevated operations (delete, non-allowlisted programs, opt-in shell)
   require a human approval on the Mac, bound to the exact planned action:
-  the argv plus the SHA-256 of every workspace file named in it (which must
-  exist at approval time; a plan naming a missing, symlinked, or >64 MB file
-  is refused rather than approved unbound), single-use, 120 s TTL, default
-  deny. Interpreters and build tools read files beyond the named argv
-  (imports, Makefiles); those contents cannot be bound, and the approval
+  the argv plus a FROZEN COPY of every workspace file named in it. Named
+  files must exist when the request is made (a plan naming a missing,
+  symlinked, or >64 MB file is refused rather than approved unbound); at
+  request time the bridge copies them - and the sibling files they may
+  import, up to a bounded budget - into a snapshot dir only the bridge can
+  read, and execution runs the copies. Post-approval edits and concurrent
+  writers cannot change what an approved run executes, with no re-check to
+  race. Approvals are single-use (a failed execution is consumed, never
+  retried), 120 s TTL, default deny. Files a command reads WITHOUT naming
+  them in argv (data files, Makefiles) cannot be frozen, and the approval
   line says so explicitly. Auto-allowed commands are additionally bounded by
   a 300 s execution timeout and per-agent rate limits. The agent cannot approve anything
   itself and cannot widen its own permissions: per-agent program grants are
