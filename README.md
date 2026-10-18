@@ -7,7 +7,7 @@
 
 # AgentBridge
 
-**Let any AI agent work on your Mac - safely.** Your cloud agent does real work on your machine, risky actions wait for your yes, and what you approve is exactly what runs.
+**Let your cloud AI agent work on your Mac - safely.** It does real work on your machine. Risky actions wait for your yes - and what you approve is exactly what runs.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)]()
@@ -29,9 +29,11 @@
   </tr>
 </table>
 
-Any agent that can make HTTPS requests can pair - the handshake is two calls, written up in [docs/protocol.md](docs/protocol.md).
-
 </div>
+
+AgentBridge is a small app that lives on your Mac and gives your cloud AI agent - Claude, ChatGPT, Cursor, or any agent that can make HTTPS requests - a safe way to do real work there: organize files, run scripts, automate the boring parts.
+
+You stay in charge. Everyday, read-only work runs freely inside a folder you choose. Anything risky - deleting files, changing settings, reaching outside that folder - stops and waits for your yes at your own keyboard. Nothing can approve itself, and every action is signed and logged, so you can always see exactly what happened.
 
 ## Quick start
 
