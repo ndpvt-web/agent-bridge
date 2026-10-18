@@ -12,26 +12,22 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)]()
 [![GitHub release](https://img.shields.io/github/v/release/ndpvt-web/agent-bridge)](https://github.com/ndpvt-web/agent-bridge/releases/latest)
-[![GitHub stars](https://img.shields.io/github/stars/ndpvt-web/agent-bridge)](https://github.com/ndpvt-web/agent-bridge/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/ndpvt-web/agent-bridge?cacheSeconds=3600)](https://github.com/ndpvt-web/agent-bridge/stargazers)
 [![Tests: 306 passing](https://img.shields.io/badge/tests-306%20passing-brightgreen)]()
 
 [Quick Start](#quick-start) · [Approvals](#you-approve-what-matters) · [Two Modes](#two-modes) · [Security](#how-it-stays-safe) · [Docs](docs)
 
 **Works with your agent**
 
-<p>
-  <img src="assets/tiles/instinct.png" alt="Instinct" width="72">
-  &nbsp;&nbsp;
-  <img src="assets/tiles/claude.png" alt="Claude" width="72">
-  &nbsp;&nbsp;
-  <img src="assets/tiles/openai.png" alt="ChatGPT and Codex" width="72">
-  &nbsp;&nbsp;
-  <img src="assets/tiles/cursor.png" alt="Cursor" width="72">
-  &nbsp;&nbsp;
-  <img src="assets/tiles/meta.png" alt="Meta Muse" width="72">
-</p>
-
-<sub>Instinct · Claude · ChatGPT · Codex · Meta Muse</sub>
+<table>
+  <tr>
+    <td align="center"><img src="assets/tiles/instinct.png" alt="Instinct" width="72"><br><sub>Instinct</sub></td>
+    <td align="center"><img src="assets/tiles/claude.png" alt="Claude" width="72"><br><sub>Claude</sub></td>
+    <td align="center"><img src="assets/tiles/openai.png" alt="ChatGPT and Codex" width="72"><br><sub>ChatGPT</sub></td>
+    <td align="center"><img src="assets/tiles/cursor.png" alt="Cursor" width="72"><br><sub>Cursor</sub></td>
+    <td align="center"><img src="assets/tiles/meta.png" alt="Meta Muse" width="72"><br><sub>Meta</sub></td>
+  </tr>
+</table>
 
 Any agent that can make HTTPS requests can pair - the handshake is two calls, written up in [docs/protocol.md](docs/protocol.md).
 
