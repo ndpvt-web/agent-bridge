@@ -16,8 +16,11 @@ function realpathOrSelf(p) {
 
 // Resolve `target` against `roots` (array of absolute real paths).
 // Relative paths resolve against `anchor` (the workspace root), never the
-// process cwd. Returns { real, root } or throws JailError.
-function resolveInRoots(target, roots, anchor) {
+// process cwd. opts.installDir + opts.workspaceRoot: anything inside the
+// bridge's own install dir that is NOT the workspace is always denied, so a
+// read root of $HOME can never expose secrets/, approvals/, or logs/.
+// Returns { real, root } or throws JailError.
+function resolveInRoots(target, roots, anchor, opts = {}) {
   if (typeof target !== 'string' || target.length === 0) throw new JailError('empty path');
   if (target.includes('\0')) throw new JailError('NUL in path');
   const expanded = target.replace(/^~(?=$|\/)/, os.homedir());
@@ -38,7 +41,15 @@ function resolveInRoots(target, roots, anchor) {
 
   for (const root of roots) {
     const realRoot = realpathOrSelf(root);
-    if (real === realRoot || real.startsWith(realRoot + path.sep)) {
+    const prefix = realRoot === path.parse(realRoot).root ? realRoot : realRoot + path.sep;
+    if (real === realRoot || real.startsWith(prefix)) {
+      if (opts.installDir && opts.workspaceRoot) {
+        const inst = realpathOrSelf(opts.installDir);
+        const ws = realpathOrSelf(opts.workspaceRoot);
+        const inInst = real === inst || real.startsWith(inst + path.sep);
+        const inWs = real === ws || real.startsWith(ws + path.sep);
+        if (inInst && !inWs) throw new JailError('bridge state is not agent-visible: ' + target);
+      }
       return { real, root: realRoot };
     }
   }
@@ -52,4 +63,24 @@ function assertRegularFileOrDir(real) {
   return st;
 }
 
-module.exports = { JailError, resolveInRoots, assertRegularFileOrDir, realpathOrSelf };
+// Open with symlink-race hardening: lstat the path, open with O_NOFOLLOW,
+// then verify the opened fd is the same inode the lstat saw. Narrows the
+// check-to-open window to "must swap twice, timed to the nanosecond".
+function safeOpen(real, flags, mode) {
+  const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
+  let before = null;
+  try { before = fs.lstatSync(real); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const fd = fs.openSync(real, flags | NOFOLLOW, mode);
+  try {
+    const after = fs.fstatSync(fd);
+    if (before && (before.dev !== after.dev || before.ino !== after.ino)) {
+      throw new JailError('path changed during open (race) - refusing');
+    }
+    if (after.nlink > 1 && (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR))) {
+      throw new JailError('hardlinked file - refusing to write through it');
+    }
+    return fd;
+  } catch (e) { fs.closeSync(fd); throw e; }
+}
+
+module.exports = { JailError, resolveInRoots, assertRegularFileOrDir, realpathOrSelf, safeOpen };

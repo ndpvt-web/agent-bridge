@@ -54,33 +54,46 @@ class Approvals {
   }
 
   // kind: 'shell' | 'process' | 'delete' | 'write'
+  // Locked like decide/consume: a create racing a human decision must never
+  // overwrite it.
   create({ kind, agentId, summary, payload, toolName }) {
-    // Keep live pendings; also retain the most recent 200 decided records for forensics.
-    const all = this._read();
-    const live = all.filter(a => a.status === 'pending' && Date.now() < a.expires_at);
-    const decided = all.filter(a => !(a.status === 'pending' && Date.now() < a.expires_at)).slice(-200);
-    const list = [...decided, ...live];
     const a = {
       id: 'apr_' + crypto.randomBytes(9).toString('base64url'),
       kind, agent_id: agentId,
-      summary: String(summary).slice(0, 500),
+      // The human sees the summary; keep it faithful and complete enough to
+      // decide on (bounded so the store stays small).
+      summary: String(summary).slice(0, 4000),
       payload, // planned action, executed only after approval
       tool_name: toolName || null,
       status: 'pending',
       created_at: new Date().toISOString(),
       expires_at: Date.now() + APPROVAL_TTL_MS,
     };
-    list.push(a);
-    this._write(list);
+    this._withLock(() => {
+      // Keep live pendings; also retain the most recent 200 decided records
+      // for forensics. Approved-but-unpolled approvals are never dropped.
+      const all = this._read();
+      const live = all.filter(x => x.status === 'pending' && Date.now() < x.expires_at);
+      const decided = all.filter(x => !(x.status === 'pending' && Date.now() < x.expires_at)).slice(-200);
+      this._write([...decided, ...live, a]);
+    });
     this._notifyDesktop(a);
     return { id: a.id, expires_at: a.expires_at };
   }
 
   _notifyDesktop(a) {
     // Best-effort GUI notification on macOS; silently skipped headless/Linux.
+    // Text goes through osascript ARGV, never interpolated into the script,
+    // so an agent-controlled summary cannot inject AppleScript.
     if (process.platform !== 'darwin') return;
-    const script = `display notification "${a.kind} requested by ${a.agent_id} (approve in Terminal: agent-bridge approve ${a.id})" with title "AgentBridge approval needed"`;
-    execFile('/usr/bin/osascript', ['-e', script], { timeout: 3000 }, () => {});
+    execFile('/usr/bin/osascript', [
+      '-e', 'on run argv',
+      '-e', 'display notification (item 1 of argv) with title (item 2 of argv)',
+      '-e', 'end run',
+      '--',
+      `${a.kind} requested by ${a.agent_id}. Details: agent-bridge pending`,
+      'AgentBridge approval needed',
+    ], { timeout: 3000 }, () => {});
   }
 
   // Server-side poll. Returns 'pending' | 'approved' | 'denied' | 'expired' | 'unknown'
@@ -105,17 +118,55 @@ class Approvals {
     });
   }
 
-  // Mark an approved approval as consumed so it can never be replayed.
-  consume(id) {
+  // Two-phase execution lifecycle: approved -> executing -> consumed.
+  // A failed execution returns to 'approved' so the agent can retry.
+  beginExecution(id) {
     return this._withLock(() => {
       const list = this._read();
       const a = list.find(x => x.id === id);
       if (!a || a.status !== 'approved') return false;
+      a.status = 'executing';
+      a.execution_started_at = new Date().toISOString();
+      this._write(list);
+      return true;
+    });
+  }
+
+  finishExecution(id) {
+    return this._withLock(() => {
+      const list = this._read();
+      const a = list.find(x => x.id === id);
+      if (!a || a.status !== 'executing') return false;
       a.status = 'consumed';
       a.consumed_at = new Date().toISOString();
       this._write(list);
       return true;
     });
   }
+
+  failExecution(id) {
+    return this._withLock(() => {
+      const list = this._read();
+      const a = list.find(x => x.id === id);
+      if (!a || a.status !== 'executing') return false;
+      a.status = 'approved'; // retryable
+      this._write(list);
+      return true;
+    });
+  }
+
+  expire(id) {
+    return this._withLock(() => {
+      const list = this._read();
+      const a = list.find(x => x.id === id);
+      if (!a) return false;
+      a.status = 'expired';
+      this._write(list);
+      return true;
+    });
+  }
+
+  // Backwards-compatible single-shot consume (kept for older call sites).
+  consume(id) { return this.beginExecution(id) && this.finishExecution(id); }
 }
 module.exports = { Approvals, APPROVAL_TTL_MS };

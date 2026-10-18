@@ -39,12 +39,18 @@
   itself and cannot widen its own permissions: per-agent program grants are
   set exclusively by the CLI on the Mac.
 
-### 3. Interpreters as an allowlist bypass (rogue agent)
+### 3. Interpreters and flag-attached paths as allowlist bypass (rogue agent)
 - **v1-style failure:** allowlisting `node`, `python3`, `git`, `make`, `find`,
-  `tar`, `curl` etc. is equivalent to allowing a shell.
-- **v2 defense:** the auto-allowlist contains only programs that cannot
-  execute attacker-controlled code and cannot write outside their arguments.
-  Everything else → approval or an explicit human grant.
+  `tar`, `curl` etc. is equivalent to allowing a shell. Allowlisting by
+  program name alone is *also* broken: `sort --output=~/.zshrc`,
+  `rg --pre=sh`, `grep --file=/etc/passwd`.
+- **v2 defense:** the auto-allowlist is a set of per-program argument
+  grammars. Flags are deny-by-default; joined `--opt=value` forms are never
+  auto-allowed; every positional path must resolve inside the workspace
+  jail; programs that can execute code (interpreters, build tools, package
+  managers, anything with an exec/pre/output option) are not in the list at
+  all. Everything else → approval or an explicit human grant via the CLI,
+  which warns loudly when the granted program can run code.
 
 ### 4. Planted binary (rogue agent)
 - **Attack:** agent writes an executable named `ls` into the workspace and
@@ -59,13 +65,15 @@
 - **v2 defense:** the deepest existing ancestor is `realpath`-resolved
   (symlinks die here) before the prefix check; the non-existent tail is
   re-appended lexically. Writes/deletes are confined to the workspace root
-  regardless of read roots. Reads use `O_NOFOLLOW`; writes open with
-  `O_NOFOLLOW` so a symlink swapped in after the check cannot redirect them.
-  Final-component symlinks are rejected outright.
-- **Residual:** a symlink swapped in between `realpath` and `open` on a
-  *parent directory* is a known race; the window is microseconds and
-  requires local code execution to exploit reliably, which is already out
-  of scope.
+  regardless of read roots, and reads default to the workspace only - the
+  bridge's own install dir is denied even when a parent is a read root.
+  Writes refuse a symlink at the lexical final component, refuse hardlinked
+  files, and go through race-checked opens (`O_NOFOLLOW` plus an inode
+  comparison between lstat and the opened fd) with temp-file + rename
+  atomicity. Deletes re-validate everything at execution time.
+- **Residual:** a parent-directory swap timed between the realpath check and
+  the open is narrowed to a same-inode race window; reliably winning it
+  needs local code execution, which is out of scope.
 
 ### 6. Browser drive-by / DNS rebinding (remote stranger → local user)
 - **v1 failure:** `Access-Control-Allow-Origin: *` with `Authorization` in
@@ -84,14 +92,19 @@
 
 ### 8. Pairing endpoint abuse
 - **Defense:** codes are 50-bit, 10-minute TTL, single-use, max 5 active;
-  failed attempts are rate-limited (6 per 10 min per source IP). Failures
-  are audited.
+  failed attempts are rate-limited (6 per 10 min per source; behind the
+  tunnel the source is keyed on `CF-Connecting-IP` from loopback only).
+  Failures are audited. Pairing requires a code the human generates on the
+  Mac, so throttling can never lock out the human - worst case it slows
+  adding a *new* agent while an attack is ongoing.
 
 ### 9. Silent tampering / repudiation
-- **v2 defense:** every decision (pair, reject, rate-limit, execute,
-  approve, deny) is appended to a hash-chained, HMAC-authenticated JSONL
-  audit log. `agent-bridge audit --verify` proves integrity. The HMAC key
-  never leaves the device.
+- **v2 defense:** every decision (pair, reject, rate-limit, execute, jail
+  denial, capability denial, CLI approve/deny/grant) is appended to a
+  hash-chained, HMAC-authenticated JSONL audit log. `agent-bridge audit
+  --verify` proves integrity. The HMAC key is not agent-readable (the
+  install dir is denied). Honest limit: verification detects edits and gaps,
+  not truncation of the newest entries.
 
 ### 10. Supply chain
 - **v1 failure:** unpinned downloads; `kill -9` of whatever held the port;
@@ -107,6 +120,8 @@
 - Quick tunnels move: on reconnect the URL changes. Re-pairing is NOT
   required (keys are URL-independent), but the agent needs the new URL.
 - Approvals are CLI/notification-based; a user who approves everything
-  reflexively defeats rule 5. The UI names the exact action for this reason.
+  reflexively defeats rule 5. The CLI shows the exact action - argv as a
+  JSON array, control characters escaped - and asks for confirmation.
+  Approved actions go stale after 10 minutes.
 - The bridge does not defend against a compromised user account, a
   malicious kernel, or physical access.

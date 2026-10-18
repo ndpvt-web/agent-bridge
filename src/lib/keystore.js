@@ -19,6 +19,32 @@ class KeyStore {
     this.agentsPath = path.join(dir, 'agents.json');
     this.codesPath = path.join(dir, 'pairing-codes.json');
     this.auditKeyPath = path.join(dir, 'audit.key');
+    this.lockPath = path.join(dir, '.lock');
+  }
+
+  // Cross-process mutex: server and CLI both mutate these files; an unlocked
+  // read-modify-write can silently undo a revoke or lose a pairing code.
+  _locked(fn) {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      let fd;
+      try { fd = fs.openSync(this.lockPath, 'wx', 0o600); }
+      catch (e) {
+        if (e.code === 'EEXIST') {
+          try {
+            const st = fs.statSync(this.lockPath);
+            if (Date.now() - st.mtimeMs > 30000) { fs.unlinkSync(this.lockPath); continue; }
+          } catch {}
+          if (Date.now() > deadline) throw new Error('keystore locked');
+          const until = Date.now() + 25;
+          while (Date.now() < until) {}
+          continue;
+        }
+        throw e;
+      }
+      try { return fn(); }
+      finally { fs.closeSync(fd); try { fs.unlinkSync(this.lockPath); } catch {} }
+    }
   }
 
   _readJson(p, fallback) {
@@ -44,6 +70,9 @@ class KeyStore {
 
   // --- pairing codes ---
   createPairingCode(profile) {
+    return this._locked(() => this._createPairingCode(profile));
+  }
+  _createPairingCode(profile) {
     const codes = this._readJson(this.codesPath, []).filter(c => Date.now() < c.expires_at && !c.used);
     if (codes.length >= MAX_PAIRING_CODES) throw new Error('too many active pairing codes; revoke one first');
     // Human-transcribable: 4 groups of 4 base32 chars, Crockford-ish alphabet
@@ -65,6 +94,9 @@ class KeyStore {
 
   // Consume a pairing code. Returns {profile} or null.
   consumePairingCode(code) {
+    return this._locked(() => this._consumePairingCode(code));
+  }
+  _consumePairingCode(code) {
     const norm = String(code || '').toUpperCase().trim();
     const codes = this._readJson(this.codesPath, []);
     const h = sha256(norm);
@@ -86,6 +118,9 @@ class KeyStore {
   }
 
   addAgent(name, profile, publicKeyB64Url) {
+    return this._locked(() => this._addAgent(name, profile, publicKeyB64Url));
+  }
+  _addAgent(name, profile, publicKeyB64Url) {
     const agents = this._readJson(this.agentsPath, []);
     const id = 'agt_' + crypto.randomBytes(9).toString('base64url');
     agents.push({
@@ -108,12 +143,17 @@ class KeyStore {
     const now = Date.now();
     if (this._lastTouch[id] && now - this._lastTouch[id] < 30000) return;
     this._lastTouch[id] = now;
-    const agents = this._readJson(this.agentsPath, []);
-    const a = agents.find(x => x.id === id);
-    if (a) { a.last_seen_at = new Date().toISOString(); this._writeJson(this.agentsPath, agents); }
+    this._locked(() => {
+      const agents = this._readJson(this.agentsPath, []);
+      const a = agents.find(x => x.id === id);
+      if (a) { a.last_seen_at = new Date().toISOString(); this._writeJson(this.agentsPath, agents); }
+    });
   }
 
   setProgramAllowed(id, program, allowed) {
+    return this._locked(() => this._setProgramAllowed(id, program, allowed));
+  }
+  _setProgramAllowed(id, program, allowed) {
     const agents = this._readJson(this.agentsPath, []);
     const a = agents.find(x => x.id === id);
     if (!a) return false;
@@ -126,6 +166,9 @@ class KeyStore {
   }
 
   revokeAgent(id) {
+    return this._locked(() => this._revokeAgent(id));
+  }
+  _revokeAgent(id) {
     const agents = this._readJson(this.agentsPath, []);
     const a = agents.find(x => x.id === id);
     if (!a) return false;

@@ -20,10 +20,21 @@ LAUNCHD_DIR="$HOME/Library/LaunchAgents"
 PROFILE="workspace"
 ENABLE_SHELL=0
 
-# Pinned dependency versions (update + re-pin checksums on upgrades)
+# Pinned dependency versions AND their SHA-256 hashes, embedded in this
+# installer. Verification is fail-closed: a checksum mismatch aborts the
+# install. To upgrade, change the version and its two hashes together.
 NODE_VERSION="22.20.0"
-# SHA-256 is verified against nodejs.org's own SHASUMS256.txt at install time.
+NODE_SHA256_ARM64="cc04a76a09f79290194c0646f48fec40354d88969bec467789a5d55dd097f949"
+NODE_SHA256_X64="00df9c5df3e4ec6848c26b70fb47bf96492f342f4bed6b17f12d99b3a45eeecc"
 CLOUDFLARED_VERSION="2025.9.1"
+CF_SHA256_ARM64="0c20739ccab70c804e97b824a048e2028869c01e8c795b0033dd66b61962d491"
+CF_SHA256_AMD64="3d205852967f91823798dd909cc8e0a10c07db7ab0a9f0a7b5fd21a0e7766e82"
+
+# --- Input validation (values are interpolated into config + plists) ---
+case "$PROFILE" in readonly|workspace|developer) ;; *) fail "Unknown --profile '$PROFILE' (want readonly|workspace|developer)";; esac
+case "$BRIDGE_PORT" in ''|*[!0-9]*) fail "AGENT_BRIDGE_PORT must be numeric";; esac
+[[ "$BRIDGE_PORT" -ge 1024 && "$BRIDGE_PORT" -le 65535 ]] || fail "AGENT_BRIDGE_PORT out of range"
+case "$HOME" in *[\&\<\>]*) fail "HOME contains characters unsafe for plist XML";; esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,59 +65,59 @@ chmod 700 "$BRIDGE_DIR"
 
 # --- Node.js (pinned, checksum-verified) ---
 install_node() {
+  if [[ -x "$BIN_DIR/node" ]]; then NODE_BIN="$BIN_DIR/node"; ok "Node (previously installed, pinned)"; return; fi
   if command -v node &>/dev/null; then
     local major
     major=$(node --version | sed 's/v//' | cut -d. -f1)
-    if [[ "$major" -ge 18 ]]; then NODE_BIN=$(command -v node); ok "Node $(node --version) found"; return; fi
+    if [[ "$major" -ge 18 ]]; then
+      NODE_BIN=$(command -v node)
+      warn "Using system Node $(node --version) (NOT pinned/verified). Remove it from PATH to force the pinned download."
+      return
+    fi
   fi
-  if [[ -x "$BIN_DIR/node" ]]; then NODE_BIN="$BIN_DIR/node"; ok "Node (previously installed)"; return; fi
 
   local fname="node-v${NODE_VERSION}-darwin-${NODE_ARCH}.tar.gz"
-  local base="https://nodejs.org/dist/v${NODE_VERSION}"
-  local tmp_t tmp_sums
-  tmp_t=$(mktemp /tmp/agentbridge-node.XXXXXX.tar.gz)
-  tmp_sums=$(mktemp /tmp/agentbridge-sums.XXXXXX.txt)
+  local expected
+  if [[ "$NODE_ARCH" == "arm64" ]]; then expected="$NODE_SHA256_ARM64"; else expected="$NODE_SHA256_X64"; fi
+  local work
+  work=$(mktemp -d) || fail "mktemp failed"
   info "Downloading Node.js v${NODE_VERSION} (pinned)..."
-  curl -fsSL "$base/$fname" -o "$tmp_t" || fail "Node download failed"
-  curl -fsSL "$base/SHASUMS256.txt" -o "$tmp_sums" || fail "Checksum file download failed"
-  info "Verifying SHA-256..."
-  (cd /tmp && grep " $fname\$" "$tmp_sums" | shasum -a 256 -c - --quiet 2>/dev/null) \
-    || { mv "$tmp_t" "/tmp/$fname"; (cd /tmp && grep " $fname\$" "$tmp_sums" | shasum -a 256 -c - --quiet) || fail "CHECKSUM MISMATCH for Node.js - aborting"; }
-  local extract
-  extract=$(mktemp -d /tmp/agentbridge-node-x.XXXXXX)
-  tar -xzf "/tmp/$fname" -C "$extract" --strip-components=1 2>/dev/null || { tar -xzf "$tmp_t" -C "$extract" --strip-components=1; }
-  cp "$extract/bin/node" "$BIN_DIR/node"
+  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$fname" -o "$work/node.tar.gz" || fail "Node download failed"
+  info "Verifying SHA-256 against the hash pinned in this installer..."
+  local actual
+  actual=$(shasum -a 256 "$work/node.tar.gz" | awk '{print $1}')
+  [[ "$actual" == "$expected" ]] || fail "CHECKSUM MISMATCH for Node.js (got $actual) - aborting"
+  mkdir -p "$work/x"
+  tar -xzf "$work/node.tar.gz" -C "$work/x" --strip-components=1
+  cp "$work/x/bin/node" "$BIN_DIR/node"
   chmod 755 "$BIN_DIR/node"
-  rm -rf "$tmp_t" "$tmp_sums" "$extract" "/tmp/$fname"
+  rm -rf "$work"
   NODE_BIN="$BIN_DIR/node"
-  ok "Node $("$NODE_BIN" --version) installed (checksum verified)"
+  ok "Node $("$NODE_BIN" --version) installed (pinned hash verified)"
 }
 
 # --- cloudflared (pinned, checksum-verified) ---
 install_cloudflared() {
-  if command -v cloudflared &>/dev/null; then CF_BIN=$(command -v cloudflared); ok "cloudflared found"; return; fi
-  if [[ -x "$BIN_DIR/cloudflared" ]]; then CF_BIN="$BIN_DIR/cloudflared"; ok "cloudflared (previously installed)"; return; fi
-  local url="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-darwin-${CF_ARCH}.tgz"
-  local sums_url="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/checksums.txt"
-  local tmp_t
-  tmp_t=$(mktemp /tmp/agentbridge-cf.XXXXXX.tgz)
-  info "Downloading cloudflared ${CLOUDFLARED_VERSION} (pinned)..."
-  curl -fsSL "$url" -o "$tmp_t" || fail "cloudflared download failed"
-  local actual
-  actual=$(shasum -a 256 "$tmp_t" | awk '{print $1}')
-  local expected
-  expected=$(curl -fsSL "$sums_url" 2>/dev/null | grep "cloudflared-darwin-${CF_ARCH}.tgz" | awk '{print $1}' || true)
-  if [[ -n "$expected" ]]; then
-    [[ "$actual" == "$expected" ]] || fail "CHECKSUM MISMATCH for cloudflared - aborting"
-    ok "cloudflared checksum verified"
-  else
-    warn "Could not fetch cloudflared checksums; verifying signature-free download is from github.com/cloudflare only"
+  if [[ -x "$BIN_DIR/cloudflared" ]]; then CF_BIN="$BIN_DIR/cloudflared"; ok "cloudflared (previously installed, pinned)"; return; fi
+  if command -v cloudflared &>/dev/null; then
+    CF_BIN=$(command -v cloudflared)
+    warn "Using system cloudflared (NOT pinned/verified). Remove it from PATH to force the pinned download."
+    return
   fi
-  tar -xzf "$tmp_t" -C "$BIN_DIR"
+  local expected
+  if [[ "$CF_ARCH" == "arm64" ]]; then expected="$CF_SHA256_ARM64"; else expected="$CF_SHA256_AMD64"; fi
+  local work
+  work=$(mktemp -d) || fail "mktemp failed"
+  info "Downloading cloudflared ${CLOUDFLARED_VERSION} (pinned)..."
+  curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-darwin-${CF_ARCH}.tgz" -o "$work/cf.tgz" || fail "cloudflared download failed"
+  local actual
+  actual=$(shasum -a 256 "$work/cf.tgz" | awk '{print $1}')
+  [[ "$actual" == "$expected" ]] || fail "CHECKSUM MISMATCH for cloudflared (got $actual) - aborting"
+  tar -xzf "$work/cf.tgz" -C "$BIN_DIR"
   chmod 755 "$BIN_DIR/cloudflared"
-  rm -f "$tmp_t"
+  rm -rf "$work"
   CF_BIN="$BIN_DIR/cloudflared"
-  ok "cloudflared ${CLOUDFLARED_VERSION} installed"
+  ok "cloudflared ${CLOUDFLARED_VERSION} installed (pinned hash verified)"
 }
 
 install_node
@@ -116,12 +127,12 @@ install_cloudflared
 step() { printf '\n\033[1m\033[0;36m==> %s\033[0m\n' "$1"; }
 step "Installing AgentBridge server"
 # The src/ tree is embedded below as a base64 tarball by scripts/build-installer.sh.
-PAYLOAD=$(mktemp /tmp/agentbridge-src.XXXXXX.tgz.b64)
-cat > "$PAYLOAD" << 'PAYLOAD_EOF'
+WORK=$(mktemp -d) || fail "mktemp failed"
+cat > "$WORK/payload.b64" << 'PAYLOAD_EOF'
 __SERVER_PAYLOAD__
 PAYLOAD_EOF
-base64 -d -i "$PAYLOAD" | tar -xzf - -C "$BRIDGE_DIR"
-rm -f "$PAYLOAD"
+base64 -d -i "$WORK/payload.b64" | tar -xzf - -C "$BRIDGE_DIR"
+rm -rf "$WORK"
 chmod 700 "$BRIDGE_DIR/src"
 chmod 600 "$BRIDGE_DIR/src/lib/"*.js "$BRIDGE_DIR/src/tools/"*.js "$BRIDGE_DIR/src/server.js" "$BRIDGE_DIR/src/cli.js"
 
@@ -137,7 +148,10 @@ case ":$PATH:" in
   *) warn "Add to PATH: export PATH=\"$HOME/.local/bin:\$PATH\"" ;;
 esac
 
-# --- Config ---
+# --- Config (never silently clobber an existing install's choices) ---
+if [[ -f "$BRIDGE_DIR/config.json" ]]; then
+  ok "Existing config.json kept (edit it directly to change settings)"
+else
 cat > "$BRIDGE_DIR/config.json" << CFG
 {
   "port": $BRIDGE_PORT,
@@ -147,6 +161,7 @@ cat > "$BRIDGE_DIR/config.json" << CFG
 }
 CFG
 chmod 600 "$BRIDGE_DIR/config.json"
+fi
 
 # --- launchd (auto-start on login, restart on crash) ---
 step "Setting up launchd services"
@@ -204,13 +219,23 @@ done
 [[ -n "$TUNNEL_URL" ]] && echo "$TUNNEL_URL" > "$BRIDGE_DIR/.tunnel-url" && chmod 600 "$BRIDGE_DIR/.tunnel-url"
 
 # --- Uninstaller ---
-cat > "$BRIDGE_DIR/uninstall.sh" << UN
+cat > "$BRIDGE_DIR/uninstall.sh" << 'UN'
 #!/bin/bash
-launchctl unload ~/Library/LaunchAgents/com.agentbridge.server.plist 2>/dev/null
-launchctl unload ~/Library/LaunchAgents/com.agentbridge.tunnel.plist 2>/dev/null
-rm -f ~/Library/LaunchAgents/com.agentbridge.*.plist ~/.local/bin/agent-bridge
-rm -rf ~/agent-bridge
-echo "AgentBridge removed."
+set -e
+echo "This disconnects all agents and removes the bridge, its keys and logs."
+echo "Your workspace, trash and versions are KEPT unless you pass --purge."
+read -r -p "Continue? [y/N] " a
+[[ "$a" == "y" || "$a" == "Y" ]] || { echo "Aborted."; exit 1; }
+launchctl unload ~/Library/LaunchAgents/com.agentbridge.server.plist 2>/dev/null || true
+launchctl unload ~/Library/LaunchAgents/com.agentbridge.tunnel.plist 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.agentbridge.server.plist ~/Library/LaunchAgents/com.agentbridge.tunnel.plist ~/.local/bin/agent-bridge
+if [[ "${1:-}" == "--purge" ]]; then
+  rm -rf ~/agent-bridge
+  echo "AgentBridge and all data removed."
+else
+  rm -rf ~/agent-bridge/src ~/agent-bridge/secrets ~/agent-bridge/approvals ~/agent-bridge/logs ~/agent-bridge/bin ~/agent-bridge/config.json ~/agent-bridge/.tunnel-url
+  echo "AgentBridge removed. Kept: ~/agent-bridge/{workspace,trash,versions}"
+fi
 UN
 chmod 755 "$BRIDGE_DIR/uninstall.sh"
 

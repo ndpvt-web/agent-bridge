@@ -22,6 +22,9 @@ AgentBridge's security boundary assumes:
 
 - Keep `enable_shell: false` (the default) unless you truly need it.
 - Prefer the `workspace` profile; grant `developer` only to agents that build.
+- Reads default to the workspace only. Adding your home directory as a read
+  root (config.json) exposes everything in it to every paired agent - except
+  the bridge's own state, which stays denied.
 - Use `agent-bridge audit --verify` periodically to check log integrity.
 - For a second identity layer, put a named Cloudflare Tunnel with Access
   (JWT verification) in front of the bridge.

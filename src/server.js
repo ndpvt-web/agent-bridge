@@ -5,8 +5,10 @@
  *
  * Security model (see docs/threat-model.md):
  *  - Loopback-only bind; the tunnel carries remote traffic.
- *  - Pairing with one-time codes; per-agent secrets; HMAC-signed requests
- *    with timestamp window and nonce replay protection. No bearer tokens.
+ *  - Pairing with one-time codes; Ed25519 public-key auth; every request is
+ *    a signature over (agent, ts, nonce, method, path, body hash) with a
+ *    timestamp window and nonce replay protection. No shared secrets
+ *    stored anywhere: the bridge keeps only public keys.
  *  - Capability tools (MCP-style JSON-RPC), not a raw shell. Shell access is
  *    a separate install-time opt-in and every call needs on-device approval.
  *  - Filesystem jail with realpath symlink resolution; writes workspace-only.
@@ -38,6 +40,7 @@ function startServer(installDir, opts = {}) {
   fs.mkdirSync(cfg.workspace_root, { recursive: true, mode: 0o700 });
   const nonces = new NonceCache();
   const limiter = new RateLimiter();
+  const bootTime = Date.now(); // timestamps older than boot are always rejected (nonce cache is in-memory)
 
   const readRoots = [cfg.workspace_root, ...(cfg.read_roots_extra || [])];
 
@@ -130,7 +133,7 @@ function startServer(installDir, opts = {}) {
     if (agent.revoked) return { error: [401, 'agent revoked'] };
 
     const tsNum = Number(ts);
-    if (!Number.isFinite(tsNum) || Math.abs(Date.now() - tsNum) > 120000) {
+    if (!Number.isFinite(tsNum) || Math.abs(Date.now() - tsNum) > 120000 || tsNum < bootTime - 120000) {
       return { error: [401, 'timestamp outside +/-120s window'] };
     }
     if (typeof nonce !== 'string' || nonce.length < 16 || nonce.length > 128) {
@@ -197,8 +200,15 @@ function startServer(installDir, opts = {}) {
         const result = await tool.execute(ctx, plan.payload);
         return reply({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result });
       } catch (e) {
-        if (e instanceof ToolError) return fail(-32000, e.code + ': ' + e.message);
-        if (e && e.code === 'EJAIL') return fail(-32000, 'forbidden: ' + e.message);
+        if (e instanceof ToolError) {
+          audit.record({ agent: agent.id, tool: name, decision: 'rejected', detail: (e.code + ': ' + e.message).slice(0, 200) });
+          return fail(-32000, e.code + ': ' + e.message);
+        }
+        if (e && e.code === 'EJAIL') {
+          audit.record({ agent: agent.id, tool: name, decision: 'jail_denied', detail: String(e.message).slice(0, 200) });
+          return fail(-32000, 'forbidden: ' + e.message);
+        }
+        audit.record({ agent: agent.id, tool: name, decision: 'internal_error', detail: String(e && e.message).slice(0, 120) });
         return fail(-32603, 'internal error');
       }
     }
@@ -218,7 +228,12 @@ function startServer(installDir, opts = {}) {
         return json(res, 200, { status: 'ok' }); // minimal by design
       }
       if (req.method === 'POST' && pathName === '/pair') {
-        return await handlePair(req, res, req.socket.remoteAddress || 'unknown');
+        // Behind cloudflared everything arrives from 127.0.0.1; the real
+        // source is CF-Connecting-IP. Trust it only on loopback connections.
+        const ra = req.socket.remoteAddress || 'unknown';
+        const cfIp = (ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1')
+          ? (req.headers['cf-connecting-ip'] || ra) : ra;
+        return await handlePair(req, res, Array.isArray(cfIp) ? cfIp[0] : cfIp);
       }
       if (req.method === 'POST' && pathName === '/mcp') {
         const rawBody = await readBody(req, cfg.max_body_bytes);

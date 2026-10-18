@@ -5,7 +5,7 @@
 - **Zero dependencies** — pure Node.js built-ins, no `npm install`, no Homebrew required
 - **Secure by design** — Ed25519-signed requests, capability-based tools, filesystem jail, on-device human approvals, tamper-evident audit log
 - **Agent-agnostic** — speaks MCP-style JSON-RPC (`initialize`, `tools/list`, `tools/call`). If your agent can call tools, it can use AgentBridge
-- **One command** — installs Node (pinned + checksum-verified), cloudflared, the bridge, and 24/7 auto-start via launchd
+- **One command** — installs Node and cloudflared (version-pinned, SHA-256 verified against hashes embedded in the installer, fail-closed), the bridge, and 24/7 auto-start via launchd
 
 ```
 curl -fsSL https://github.com/<you>/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
@@ -27,10 +27,10 @@ AgentBridge is built on a different set of assumptions:
 | Assumption | Consequence |
 |---|---|
 | The tunnel URL is public knowledge | Authentication must survive a public endpoint |
-| Any single credential can leak | No bearer tokens; per-request Ed25519 signatures |
+| Any single credential can leak | No bearer tokens; per-request Ed25519 signatures; only public keys stored |
 | The agent can be manipulated | Capabilities, not a shell; human approval for anything irreversible |
 | The laptop is on hostile networks | Loopback-only bind, no CORS, Host-header checks |
-| You will want to know what happened | Hash-chained, HMAC-authenticated audit log |
+| You will want to know what happened | Hash-chained, HMAC-authenticated audit log of every decision |
 
 ## Architecture
 
@@ -57,11 +57,11 @@ AgentBridge is built on a different set of assumptions:
 
 2. **Capabilities, not a shell.** The API is a small tool catalog: `system.info`, `fs.list`, `fs.read`, `fs.write`, `fs.delete`, `process.run`, `approval.status`. Raw `shell.exec` exists only if you opt in at install time (`--enable-shell`) — and *every* call still requires your on-device approval.
 
-3. **The allowlist is honest.** Auto-approved programs are inspection-only (`ls`, `cat`, `grep`, `jq`, …). Interpreters and build tools (`node`, `python3`, `git`, `make`, `xcodebuild`, `npm`) are shells in disguise, so they require approval — or a per-agent grant *you* set from the Mac: `agent-bridge allow <agent> xcodebuild`. The API can never expand its own permissions.
+3. **The allowlist is honest.** Auto-approved programs are inspection-only (`ls`, `cat`, `grep`, `jq`, …) and each is held to an exact argument grammar: deny-by-default flags, no joined `--opt=value` forms, and every path argument must stay inside the workspace. Interpreters and build tools (`node`, `python3`, `git`, `make`, `xcodebuild`, `npm`) are shells in disguise, so they always require approval — or a per-agent grant *you* set from the Mac: `agent-bridge allow <agent> xcodebuild` (with a loud warning when the program can execute code). The API can never expand its own permissions.
 
-4. **The filesystem is jailed.** Writes and deletes stay inside `~/agent-bridge/workspace` (symlinks resolved before the check, `O_NOFOLLOW` against races). Deletes move to a local trash; overwrites keep 20 versions. Reads can extend to your home directory but never escape configured roots.
+4. **The filesystem is jailed.** The agent sees its workspace and nothing else by default — not your home directory, not the bridge's own keys (those are denied even if you add your home as a read root). Writes and deletes stay inside `~/agent-bridge/workspace`: symlinks resolved before the check, writes are atomic (temp + rename) through race-checked opens, hardlinks refused. Deletes move to a local trash with a restore manifest; overwrites keep 20 versions.
 
-5. **You are the root of trust.** Destructive or elevated actions create a pending approval; you run `agent-bridge approve <id>` on the Mac (a macOS notification tells you when something is waiting). Default deny, 120-second expiry, single-use, race-safe.
+5. **You are the root of trust.** Destructive or elevated actions create a pending approval; `agent-bridge approve <id>` shows you the exact action — full argv as a JSON array, control characters escaped, nothing truncated or padded away — and asks you to confirm. Default deny, 120 seconds to decide, 10 minutes to execute after your yes, single-use, race-safe.
 
 See [docs/threat-model.md](docs/threat-model.md) for the full analysis and [SECURITY.md](SECURITY.md) for reporting.
 
@@ -128,7 +128,7 @@ Yes — anything that can make HTTPS POSTs. The protocol is ~100 lines to implem
 Nothing, by itself. Requests still need a paired agent's private key, fresh timestamps, and unused nonces.
 
 **What happens if the agent goes rogue?**
-It can read and write the workspace (that's the job), but deletes need your approval, interpreters need your approval, and raw shell is off unless you opted in. `agent-bridge revoke` cuts it off instantly, and `agent-bridge audit` shows you everything it did.
+By default it can only see and write its workspace — not your home directory. Deletes need your approval, interpreters and build tools need your approval, and raw shell is off unless you opted in. `agent-bridge revoke` cuts it off instantly, and `agent-bridge audit` shows you every decision it was part of.
 
 **Linux support?**
 The server is platform-neutral and is developed/tested on Linux; the installer, launchd integration, and desktop notifications are macOS-only today. Linux installers (systemd) are on the roadmap.
