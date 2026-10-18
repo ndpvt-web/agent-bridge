@@ -8,7 +8,7 @@
 - **One command** — installs Node and cloudflared (version-pinned, SHA-256 verified against hashes embedded in the installer, fail-closed), the bridge, and 24/7 auto-start via launchd
 
 ```
-curl -fsSL https://github.com/<you>/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
+curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
 agent-bridge pair
 ```
 
@@ -17,6 +17,8 @@ agent-bridge pair
 Paste the one-time pairing code and tunnel URL into your cloud agent. Done.
 
 ---
+
+> **Status — October 2026:** AgentBridge has passed one full round of independent security review (all findings fixed at the root, 169 adversarial test cases + 10 end-to-end tests green). A second, independent review round is currently running; any findings will be fixed in follow-up commits here. Treat this as release-candidate software.
 
 ## Why not just expose a shell over a tunnel?
 
@@ -69,7 +71,7 @@ See [docs/threat-model.md](docs/threat-model.md) for the full analysis and [SECU
 
 ```bash
 # 1. Install (macOS, Apple Silicon or Intel)
-curl -fsSL https://github.com/<you>/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
+curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
 
 # 2. Pair an agent (prints a one-time code, valid 10 minutes)
 agent-bridge pair                    # default: workspace profile
