@@ -7,7 +7,7 @@
 
 # AgentBridge
 
-**Let your cloud AI agent work on your Mac - safely.** It does real work on your machine. Risky actions wait for your yes - and what you approve is exactly what runs.
+**Connect your cloud AI agent to your Mac in one command.** It can run Terminal commands, work with your local files and folders, even build and run apps in the iOS simulator - and anything risky waits for your yes. What you approve is exactly what runs.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)]()
@@ -31,23 +31,30 @@
 
 </div>
 
-AgentBridge is a small app that lives on your Mac and gives your cloud AI agent - Claude, ChatGPT, Cursor, or any agent that can make HTTPS requests - a safe way to do real work there: organize files, run scripts, automate the boring parts.
+AgentBridge is a small app that lives on your Mac and lets your cloud AI agent - Claude, ChatGPT, Cursor, or any agent that can make HTTPS requests - actually use your Mac: execute commands in Terminal, read and write your local files and folders, run scripts, even drive apps like the iOS simulator.
 
-You stay in charge. Everyday, read-only work runs freely inside a folder you choose. Anything risky - deleting files, changing settings, reaching outside that folder - stops and waits for your yes at your own keyboard. Nothing can approve itself, and every action is signed and logged, so you can always see exactly what happened.
+You stay in charge. In **SAFE** mode, everyday read-only work runs freely inside a folder you choose. Anything risky - deleting files, changing settings, reaching outside that folder - stops and waits for your yes at your own keyboard. In **FULL** mode the agent can do anything, as you. Nothing can approve itself, and every action is signed and logged, so you can always see exactly what happened.
 
 ## Quick start
 
-Three steps, about a minute. No Homebrew, no npm, no account.
+One command sets everything up. No Homebrew, no npm, no account - about a minute.
 
 1. **Open Terminal** - press **Command+Space**, type `Terminal`, press **Return**.
-2. **Install** - paste this one line, press **Return** (tip: use the copy button at the top-right of the code box):
+2. **Paste the command for the version you want** (tip: use the copy button at the top-right of the code box), press **Return**:
+
+   **SAFE** (recommended - everyday work runs freely, anything risky waits for your yes):
 
    ```bash
    curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install.sh | bash
    ```
 
-   If it asks about a mode, just press **Return** (that picks SAFE, the recommended one). Done when you see **AGENTBRIDGE INSTALLED**.
-   If your shell later says `command not found`, run `export PATH="$HOME/.local/bin:$PATH"` once and try again.
+   **FULL** (the agent can do anything, as you - only if you trust it completely):
+
+   ```bash
+   curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install.sh | bash -s -- --mode full
+   ```
+
+   Done when you see **AGENTBRIDGE INSTALLED**. If your shell later says `command not found`, run `export PATH="$HOME/.local/bin:$PATH"` once and try again.
 3. **Connect your agent** - run `agent-bridge pair`. It prints two things: a **tunnel URL** (a temporary, encrypted address that lets your cloud agent reach your Mac through a Cloudflare tunnel) and a **one-time pairing code**. Paste both into your agent's chat, like this:
 
    ```
@@ -81,12 +88,6 @@ SAFE is the default and never changes silently. Switching to FULL shows one clea
 ```bash
 agent-bridge mode full    # warns, asks you to confirm, logs the switch
 agent-bridge mode safe    # back to safe
-```
-
-Or install straight into FULL:
-
-```bash
-curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install.sh | bash -s -- --mode full
 ```
 
 ## How it works
