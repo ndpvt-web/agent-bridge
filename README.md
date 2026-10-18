@@ -1,109 +1,127 @@
 <div align="center">
 
+<img src="assets/banner.png" alt="AgentBridge" width="100%">
+
 # AgentBridge
 
-**Let any AI agent work on your Mac - safely.**
-
-One command to install. One command to connect. You approve what matters.
+**Let any AI agent work on your Mac - safely.** Your cloud agent does real work on your machine, risky actions wait for your yes, and what you approve is exactly what runs.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)]()
-[![Version: 2.1.0](https://img.shields.io/badge/version-2.1.0-green)]()
+[![GitHub release](https://img.shields.io/github/v/release/ndpvt-web/agent-bridge)](https://github.com/ndpvt-web/agent-bridge/releases/latest)
+[![GitHub stars](https://img.shields.io/github/stars/ndpvt-web/agent-bridge)](https://github.com/ndpvt-web/agent-bridge/stargazers)
 [![Tests: 306 passing](https://img.shields.io/badge/tests-306%20passing-brightgreen)]()
 
-[Works With](#works-with-your-agent) · [Quick Start](#quick-start) · [Two Modes](#two-modes) · [Security](#how-it-stays-safe) · [Docs](docs)
+[Quick Start](#quick-start) · [Approvals](#you-approve-what-matters) · [Two Modes](#two-modes) · [Security](#how-it-stays-safe) · [Docs](docs)
+
+**Works with your agent**
+
+<table>
+  <tr>
+    <td align="center" width="170"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/instinct-dark.png"><img src="assets/logos/instinct.png" alt="Instinct" height="60"></picture></td>
+    <td align="center" width="170"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/anthropic-dark.svg"><img src="assets/logos/anthropic.svg" alt="Claude" height="60"></picture></td>
+    <td align="center" width="170"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/openai-dark.svg"><img src="assets/logos/openai.svg" alt="ChatGPT / Codex" height="60"></picture></td>
+    <td align="center" width="170"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/cursor-dark.svg"><img src="assets/logos/cursor.svg" alt="Cursor" height="60"></picture></td>
+    <td align="center" width="170"><img src="assets/logos/meta.svg" alt="Meta Muse" height="60"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Instinct</sub></td>
+    <td align="center"><sub>Claude</sub></td>
+    <td align="center"><sub>ChatGPT / Codex</sub></td>
+    <td align="center"><sub>Cursor</sub></td>
+    <td align="center"><sub>Meta Muse</sub></td>
+  </tr>
+</table>
+
+Any agent that can make HTTPS requests can pair - the handshake is two calls, written up in [docs/protocol.md](docs/protocol.md).
 
 </div>
 
----
-
-Your Mac, remote-controlled by an AI agent - without handing over the keys.
-
-AgentBridge runs a tiny, zero-dependency server on your Mac. Point your cloud agent at it, and the agent can do real work on your machine: run builds, read and write files, execute commands - inside limits you choose. Anything risky waits for your approval, and **what you approve is exactly what runs**.
-
-## Works with your agent
-
-<p>
-  <img src="assets/logos/instinct.png" alt="Instinct" height="64">
-  &nbsp;&nbsp;&nbsp;
-  <img src="assets/logos/openai.svg" alt="ChatGPT / Codex" height="40">
-  &nbsp;&nbsp;&nbsp;
-  <img src="assets/logos/anthropic.svg" alt="Claude" height="40">
-  &nbsp;&nbsp;&nbsp;
-  <img src="assets/logos/cursor.svg" alt="Cursor" height="40">
-  &nbsp;&nbsp;&nbsp;
-  <img src="assets/logos/meta.svg" alt="Meta Muse" height="40">
-</p>
-
-
-- **Instinct** - paste the tunnel URL and pairing code into your chat. It connects itself; you approve on the Mac.
-- **Claude, ChatGPT / Codex, Cursor, Meta Muse, or your own agent** - if it can make HTTPS requests, it can pair: the handshake is two calls, written up in [docs/protocol.md](docs/protocol.md). Give your agent the tunnel URL, the pairing code, and that doc.
-
-AgentBridge speaks MCP-style JSON-RPC (`initialize`, `tools/list`, `tools/call`) over signed HTTPS. A small adapter for native MCP client configs (`mcp.json`) is not built yet.
-
 ## Quick start
 
-1. **Open Terminal:** press **Command+Space**, type `Terminal`, press **Return**.
-2. **Paste this, press Return:**
+Three steps, about a minute. No Homebrew, no npm, no account.
+
+1. **Open Terminal** - press **Command+Space**, type `Terminal`, press **Return**.
+2. **Install** - paste this one line, press **Return**:
 
    ```bash
    curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
    ```
 
-   If it asks about a mode, just press **Return** (that picks SAFE, the recommended one). Done when you see **AGENTBRIDGE INSTALLED** - about a minute.
-3. **Connect your agent:** paste `agent-bridge pair`, press **Return**, and send the printed tunnel URL + one-time code to your AI agent. It connects itself.
+   If it asks about a mode, just press **Return** (that picks SAFE, the recommended one). Done when you see **AGENTBRIDGE INSTALLED**.
+   If your shell later says `command not found`, run `export PATH="$HOME/.local/bin:$PATH"` once and try again.
+3. **Connect your agent** - run `agent-bridge pair`. It prints two things: a **tunnel URL** (a temporary, encrypted address that lets your cloud agent reach your Mac through a Cloudflare tunnel) and a **one-time pairing code**. Paste both into your agent's chat, like this:
 
-That's it. Anything risky waits for your yes: `agent-bridge pending`, then `agent-bridge approve` or `agent-bridge deny`.
-If step 3 says `command not found`, run `export PATH="$HOME/.local/bin:$PATH"` first and try again.
+   ```
+   Use my AgentBridge to work on my Mac.
+   Tunnel: https://your-words-here.trycloudflare.com
+   Pairing code: 123456
+   Protocol: https://github.com/ndpvt-web/agent-bridge/blob/main/docs/protocol.md
+   ```
+
+   The agent connects itself. Approvals always happen on your Mac.
+
+## You approve what matters
+
+Risky actions never run silently - they wait for your decision at the keyboard:
+
+<p align="center">
+  <img src="assets/approval-flow.png" alt="A pending request shown by agent-bridge pending, then approved once with agent-bridge approve" width="760">
+</p>
+
+The yes has to come from your keyboard, on your Mac. Nothing else - not a pipe, not a script, not the agent - can approve for you.
 
 ## Two modes
 
-| | What the agent can do |
+| Mode | What the agent can do |
 | --- | --- |
-| **SAFE** (default) | Work inside one folder you choose. Everyday commands run freely; anything risky waits for your approval on the Mac. |
+| **SAFE** (default) | Work inside one folder you choose. Everyday read-only commands run freely; anything risky waits for your approval on the Mac. |
 | **FULL** | Anything, as you. No jail, no approvals. Only if you trust the agent completely. |
 
-SAFE is the default and never changes silently. To install straight into FULL:
+SAFE is the default and never changes silently. Switching to FULL shows one clear warning, asks you to confirm, and logs the switch:
+
+```bash
+agent-bridge mode full    # warns, asks you to confirm, logs the switch
+agent-bridge mode safe    # back to safe
+```
+
+Or install straight into FULL:
 
 ```bash
 curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash -s -- --mode full
 ```
 
-Switch anytime - FULL always shows one clear warning, asks you to confirm, and logs the switch:
-
-```bash
-agent-bridge mode full
-agent-bridge mode safe
-```
-
 ## How it works
 
-```
- your agent (cloud)                    your Mac
- -----------------                    --------
-      |     1. pair with one-time code      |
-      |-----------------------------------> |  agent-bridge pair
-      |                                     |
-      |     2. signed request (Ed25519)     |
-      |-----------------------------------> |  checked against your rules
-      |                                     |
-      |     3. risky? you get a yes/no      |
-      |                                     |  on the Mac - your call
-      |                                     |
-      |     4. approved bytes run, logged   |
-      | <-----------------------------------|
+```mermaid
+sequenceDiagram
+    participant A as Your agent (cloud)
+    participant M as AgentBridge (your Mac)
+    A->>M: 1. Pair with the one-time code
+    A->>M: 2. Signed request (Ed25519)
+    M->>M: Checked against your rules
+    alt Everyday read-only command
+        M-->>A: Runs right away
+    else Anything risky
+        M-->>A: Waits for your decision
+        Note over M: You approve or deny at the keyboard
+        M-->>A: Approved copy runs once, logged
+    end
 ```
 
 ## Everyday commands
 
 ```bash
-agent-bridge status     # is it running, in which mode, who is connected
-agent-bridge pending    # requests waiting for you
-agent-bridge approve    # say yes          agent-bridge deny      # say no
-agent-bridge agents     # who is connected agent-bridge revoke <name>  # cut one off
-agent-bridge audit      # tamper-evident log of everything (--verify checks integrity)
-agent-bridge trash      # browse and restore deleted files
-~/agent-bridge/uninstall.sh   # remove the bridge (keeps your files)
+agent-bridge status            # running? which mode? who is connected
+agent-bridge pending           # requests waiting for your decision
+agent-bridge approve <id>      # say yes (shows exactly what runs, first)
+agent-bridge deny <id>         # say no
+agent-bridge agents            # who is connected
+agent-bridge revoke <name>     # cut an agent off
+agent-bridge audit             # tamper-evident log of everything
+agent-bridge audit --verify    # check the log's integrity
+agent-bridge trash             # browse and restore deleted files
+~/agent-bridge/uninstall.sh    # remove the bridge (keeps your files)
 ```
 
 ## How it stays safe
@@ -123,6 +141,12 @@ Install downloads are version-pinned and SHA-256-verified, fail-closed, with no 
 - **Your files stay in a jail** - the agent sees only the folder you choose; writes are versioned, deletes go to a trash folder
 - **Every action is logged** - a tamper-evident audit trail of who did what, when
 - **Zero dependencies** - no Homebrew, no npm install; the installer sets up a pinned, hash-verified Node for you
+
+## Limitations and roadmap
+
+- **macOS only, for now** - the jail, trash folder, and installer target macOS.
+- **Native MCP adapter not built yet** - AgentBridge already speaks MCP-style JSON-RPC (`initialize`, `tools/list`, `tools/call`) over signed HTTPS; a plug-and-play `mcp.json` adapter is on the roadmap.
+- **Free tunnel URLs rotate** - when a quick Cloudflare tunnel restarts it gets a fresh address; run `agent-bridge pair` again to hand the agent the new one.
 
 ## Docs
 
