@@ -31,19 +31,36 @@ AgentBridge runs a tiny, zero-dependency server on your Mac. Point your cloud ag
 
 ## Quick start
 
+No technical knowledge needed. Four steps, about two minutes.
+
+**Step 1 - open Terminal.**
+On your Mac, press the **Command (⌘) and Space** keys together. A search box appears. Type `Terminal` and press **Return**. A plain window with a blinking cursor opens.
+
+**Step 2 - paste one line.**
+Copy the line below (select it, then Command+C), click inside the Terminal window, paste it (Command+V), and press **Return**:
+
 ```bash
 curl -fsSL https://github.com/ndpvt-web/agent-bridge/releases/latest/download/install-agent-bridge.sh | bash
 ```
 
-Then connect your agent:
+You'll see it download and check a few things - that's normal. If it asks which mode you want, just press **Return** (that picks SAFE, the recommended one). When you see **AGENTBRIDGE INSTALLED**, you're done with this step. About a minute.
+
+**Step 3 - connect your agent.**
+In the same Terminal window, paste this and press **Return**:
 
 ```bash
 agent-bridge pair
 ```
 
-Paste the tunnel URL and one-time code into your agent. Done - the bridge runs 24/7 in the background.
+It prints a **tunnel URL** and a short **one-time code** (good for 10 minutes). Send both to your AI agent - for example, paste them into your chat with it. The agent connects itself.
 
-That's the **SAFE** install (recommended). Prefer to build from source? `bash scripts/build-installer.sh`, and `npm test` runs all 306 checks.
+> If Terminal says `command not found`, paste this line first and try again:
+> `export PATH="$HOME/.local/bin:$PATH"`
+
+**Step 4 - approve what it does.**
+When your agent wants to do something risky, it waits for you. In Terminal, run `agent-bridge pending` to see what's asking, then `agent-bridge approve` or `agent-bridge deny`. Everyday safe commands don't bother you.
+
+That's it. The bridge keeps running in the background - you never have to open Terminal again unless you want to approve something or change a setting.
 
 ## Two modes
 
