@@ -48,6 +48,13 @@ agent-bridge audit      # tamper-evident log of everything
 ~/agent-bridge/uninstall.sh   # remove the bridge (keeps your files)
 ```
 
+## Works with your agent
+
+- **Instinct** - paste the tunnel URL and pairing code into your chat. It connects itself; you approve on the Mac.
+- **Claude, ChatGPT / Codex, Cursor, Meta Muse, or your own agent** - if it can make HTTPS requests, it can pair: the handshake is two calls, written up in [docs/protocol.md](docs/protocol.md). Give your agent the tunnel URL, the pairing code, and that doc.
+
+AgentBridge speaks MCP-style JSON-RPC (`initialize`, `tools/list`, `tools/call`) over signed HTTPS. A small adapter for native MCP client configs (`mcp.json`) is not built yet.
+
 ## How it stays safe
 
 Every call is cryptographically signed by a paired agent key. Files live in a realpath-checked jail. When you approve a command, the bridge freezes a private copy of every file it names and runs the copy - nothing can be swapped after you say yes. Approvals work once. Everything lands in a tamper-evident audit log. The installer's downloads are version-pinned and hash-verified.
